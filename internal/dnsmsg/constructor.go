@@ -27,6 +27,10 @@ type MessageConstructor interface {
 	//
 	// See https://www.rfc-editor.org/rfc/rfc2308#section-2.2.
 	NewMsgNODATA(req *dns.Msg) (resp *dns.Msg)
+
+	// NewMsgRateLimited creates a new response message replying to req with the
+	// RATELIMITED code.
+	NewMsgRateLimited(req *dns.Msg) (resp *dns.Msg)
 }
 
 // DefaultMessageConstructor is a default implementation of
@@ -102,6 +106,12 @@ func (DefaultMessageConstructor) NewMsgNODATA(req *dns.Msg) (resp *dns.Msg) {
 	resp.Ns = append(resp.Ns, soa)
 
 	return resp
+}
+
+// NewMsgRateLimited implements the [MessageConstructor] interface for
+// DefaultMessageConstructor.
+func (DefaultMessageConstructor) NewMsgRateLimited(req *dns.Msg) (resp *dns.Msg) {
+	return reply(req, dns.RcodeRefused)
 }
 
 // reply creates a new response message replying to req with the given code.

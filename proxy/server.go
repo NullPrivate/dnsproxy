@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"time"
 
 	"github.com/AdguardTeam/golibs/errors"
@@ -113,12 +114,24 @@ func (p *Proxy) handleDNSRequest(d *DNSContext) (err error) {
 		p.logger.Debug("ratelimited based on ip only", "addr", d.Addr)
 
 		switch d.Proto {
-		case ProtoUDP, ProtoQUIC:
+		case ProtoUDP:
 			// Don't reply to ratelimited clients.
 			return nil
-		case ProtoTCP, ProtoTLS, ProtoHTTPS, ProtoDNSCrypt:
-			d.Res = p.messages.NewMsgSERVFAIL(d.Req)
+		case ProtoTCP, ProtoTLS:
+			d.Res = p.messages.NewMsgRateLimited(d.Req)
 			p.respond(d)
+			return nil
+		case ProtoHTTPS:
+			w := d.HTTPResponseWriter
+			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			return nil
+		case ProtoDNSCrypt:
+			p.respond(d)
+			return nil
+		case ProtoQUIC:
+			if d.QUICConnection != nil {
+				d.QUICConnection.CloseWithError(0x4, "Rate limited")
+			}
 			return nil
 		default:
 			return fmt.Errorf("SHOULD NOT HAPPEN - unknown protocol: %s", d.Proto)
