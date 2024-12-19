@@ -109,11 +109,20 @@ func (p *Proxy) handleDNSRequest(d *DNSContext) (err error) {
 	//
 	// TODO(e.burkov):  Investigate if written above true and move to UDP server
 	// implementation?
-	if d.Proto == ProtoUDP && p.isRatelimited(ip) {
+	if p.isRatelimited(ip) {
 		p.logger.Debug("ratelimited based on ip only", "addr", d.Addr)
 
-		// Don't reply to ratelimited clients.
-		return nil
+		switch d.Proto {
+		case ProtoUDP, ProtoQUIC:
+			// Don't reply to ratelimited clients.
+			return nil
+		case ProtoTCP, ProtoTLS, ProtoHTTPS, ProtoDNSCrypt:
+			d.Res = p.messages.NewMsgSERVFAIL(d.Req)
+			p.respond(d)
+			return nil
+		default:
+			return fmt.Errorf("SHOULD NOT HAPPEN - unknown protocol: %s", d.Proto)
+		}
 	}
 
 	d.Res = p.validateRequest(d)
