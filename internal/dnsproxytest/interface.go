@@ -35,6 +35,7 @@ type TestMessageConstructor struct {
 	OnNewMsgSERVFAIL       func(req *dns.Msg) (resp *dns.Msg)
 	OnNewMsgNOTIMPLEMENTED func(req *dns.Msg) (resp *dns.Msg)
 	OnNewMsgNODATA         func(req *dns.Msg) (resp *dns.Msg)
+	OnNewMsgRateLimited    func(req *dns.Msg) (resp *dns.Msg)
 }
 
 // NewTestMessageConstructor creates a new *TestMessageConstructor with all it's
@@ -52,6 +53,9 @@ func NewTestMessageConstructor() (c *TestMessageConstructor) {
 		},
 		OnNewMsgNODATA: func(_ *dns.Msg) (_ *dns.Msg) {
 			panic("unexpected call of TestMessageConstructor.NewMsgNODATA")
+		},
+		OnNewMsgRateLimited: func(_ *dns.Msg) (_ *dns.Msg) {
+			panic("unexpected call of TestMessageConstructor.NewMsgRateLimited")
 		},
 	}
 }
@@ -77,5 +81,9 @@ func (c *TestMessageConstructor) NewMsgNOTIMPLEMENTED(req *dns.Msg) (resp *dns.M
 // NewMsgNODATA implements the [MessageConstructor] interface for
 // *TestMessageConstructor.
 func (c *TestMessageConstructor) NewMsgNODATA(req *dns.Msg) (resp *dns.Msg) {
+	return c.OnNewMsgNODATA(req)
+}
+
+func (c *TestMessageConstructor) NewMsgRateLimited(req *dns.Msg) (resp *dns.Msg) {
 	return c.OnNewMsgNODATA(req)
 }

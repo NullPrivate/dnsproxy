@@ -1,0 +1,40 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "go lint",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "go-lint"
+            ]
+        },
+        {
+            "label": "go deps",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "go-deps"
+            ]
+        },
+        {
+            "label": "go tools",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "go-tools"
+            ]
+        },
+        {
+            "label": "go lint all",
+            "type": "shell",
+            "dependsOn": [
+                "go lint",
+                "go deps",
+                "go tools"
+            ]
+        }
+    ]
+}

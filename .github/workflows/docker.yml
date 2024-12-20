@@ -9,7 +9,7 @@
       - 'v*'
     # Builds from the master branch will be pushed with the `dev` tag.
     'branches':
-      - 'master'
+      - 'master1'
 
 'jobs':
   'docker':
