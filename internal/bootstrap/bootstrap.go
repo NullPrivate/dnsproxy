@@ -9,12 +9,15 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"
+	"golang.org/x/net/proxy"
 )
 
 // Network is a network type for use in [Resolver]'s methods.
@@ -105,21 +108,41 @@ func NewDialContext(timeout time.Duration, l *slog.Logger, addrs ...string) (h D
 		}
 	}
 
-	dialer := &net.Dialer{
-		Timeout: timeout,
+	// Check if SOCKS proxy is configured
+	socksDialer, err := createSOCKSDialer(timeout, l)
+	if err != nil {
+		l.Error("failed to create SOCKS dialer", slogutil.KeyError, err)
+		// Fall back to direct dialing
+		socksDialer = nil
+	}
+
+	var baseDialer proxy.Dialer
+	if socksDialer != nil {
+		baseDialer = socksDialer
+		l.Debug("using SOCKS proxy for connections")
+	} else {
+		baseDialer = &net.Dialer{Timeout: timeout}
 	}
 
 	return func(ctx context.Context, network Network, _ string) (conn net.Conn, err error) {
 		var errs []error
+		actualNetwork := network
+
+		// SOCKS5 doesn't support UDP, so when using SOCKS proxy for UDP DNS,
+		// we automatically switch to TCP which provides the same DNS functionality
+		if socksDialer != nil && network == "udp" {
+			actualNetwork = "tcp"
+			l.Debug("SOCKS proxy detected for UDP DNS, automatically switching to TCP")
+		}
 
 		// Return first succeeded connection.  Note that we're using addrs
 		// instead of what's passed to the function.
 		for i, addr := range addrs {
 			a := l.With("addr", addr)
-			a.DebugContext(ctx, "dialing", "idx", i+1, "total", addrLen)
+			a.DebugContext(ctx, "dialing", "idx", i+1, "total", addrLen, "original_network", network, "actual_network", actualNetwork)
 
 			start := time.Now()
-			conn, err = dialer.DialContext(ctx, network, addr)
+			conn, err = baseDialer.Dial(actualNetwork, addr)
 			elapsed := time.Since(start)
 			if err != nil {
 				a.DebugContext(ctx, "connection failed", "elapsed", elapsed, slogutil.KeyError, err)
@@ -135,4 +158,60 @@ func NewDialContext(timeout time.Duration, l *slog.Logger, addrs ...string) (h D
 
 		return nil, errors.Join(errs...)
 	}
+}
+
+// detectSOCKSProxy checks for SOCKS proxy configuration in environment variables.
+// It returns the proxy URL if found, or empty string if not configured.
+func detectSOCKSProxy() string {
+	// Check standard proxy environment variables for SOCKS proxies
+	proxies := []string{
+		"ALL_PROXY", "all_proxy",
+		"HTTP_PROXY", "http_proxy",
+		"HTTPS_PROXY", "https_proxy",
+	}
+
+	for _, env := range proxies {
+		if proxyURL := os.Getenv(env); proxyURL != "" {
+			// Check if it's a SOCKS proxy
+			if strings.HasPrefix(strings.ToLower(proxyURL), "socks") {
+				return proxyURL
+			}
+		}
+	}
+
+	return ""
+}
+
+// createSOCKSDialer creates a SOCKS proxy dialer if configured.
+// Returns nil if no SOCKS proxy is configured.
+func createSOCKSDialer(timeout time.Duration, l *slog.Logger) (proxy.Dialer, error) {
+	socksURL := detectSOCKSProxy()
+	if socksURL == "" {
+		return nil, nil
+	}
+
+	l.Info("SOCKS proxy detected, configuring dialer", "proxy", socksURL)
+
+	proxyURL, err := url.Parse(socksURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing SOCKS proxy URL: %w", err)
+	}
+
+	var auth *proxy.Auth
+	if proxyURL.User != nil {
+		password, _ := proxyURL.User.Password()
+		auth = &proxy.Auth{
+			User:     proxyURL.User.Username(),
+			Password: password,
+		}
+	}
+
+	dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, auth, &net.Dialer{
+		Timeout: timeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating SOCKS5 dialer: %w", err)
+	}
+
+	return dialer, nil
 }

@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -441,23 +443,42 @@ func (p *dnsOverHTTPS) createClient() (*http.Client, error) {
 // HTTP3 is enabled in the upstream options).  If this attempt is successful,
 // it returns an HTTP3 transport, otherwise it returns the H1/H2 transport.
 func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
-	dialContext, err := p.getDialer()
-	if err != nil {
-		return nil, fmt.Errorf("bootstrapping %s: %w", p.addrRedacted, err)
+	// Check proxy configuration
+	proxyType, proxyURL := detectProxyType()
+	
+	var dialContext bootstrap.DialHandler
+	if proxyType == ProxyTypeNone {
+		// Only use custom DialContext if no proxy is configured
+		dialContext, err = p.getDialer()
+		if err != nil {
+			return nil, fmt.Errorf("bootstrapping %s: %w", p.addrRedacted, err)
+		}
+		p.logger.Debug("no proxy environment detected, using direct connection")
+	} else {
+		switch proxyType {
+		case ProxyTypeHTTP:
+			p.logger.Info("HTTP proxy environment detected, using system proxy settings", "proxy", proxyURL)
+		case ProxyTypeSOCKS:
+			p.logger.Info("SOCKS proxy environment detected, will use for HTTP transport", "proxy", proxyURL)
+		}
 	}
 
 	// First, we attempt to create an HTTP3 transport.  If the probe QUIC
 	// connection is established successfully, we'll be using HTTP3 for this
 	// upstream.
 	tlsConf := p.tlsConf.Clone()
-	transportH3, err := p.createTransportH3(tlsConf, dialContext)
-	if err == nil {
-		p.logger.Debug("using http/3 for this upstream, quic was faster")
-
-		return transportH3, nil
+	
+	// Only try HTTP/3 if not using proxy (QUIC doesn't work well with HTTP proxies)
+	if proxyType == ProxyTypeNone {
+		transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
+		if h3Err == nil {
+			p.logger.Debug("using http/3 for this upstream, quic was faster")
+			return transportH3, nil
+		}
+		p.logger.Debug("got error, switching to http/2 for this upstream", slogutil.KeyError, h3Err)
+	} else {
+		p.logger.Debug("proxy detected, skipping http/3 and using http/1.1 or http/2")
 	}
-
-	p.logger.Debug("got error, switching to http/2 for this upstream", slogutil.KeyError, err)
 
 	if !p.supportsHTTP() {
 		return nil, errors.Error("HTTP1/1 and HTTP2 are not supported by this upstream")
@@ -466,14 +487,20 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 	transport := &http.Transport{
 		TLSClientConfig:    tlsConf,
 		DisableCompression: true,
-		DialContext:        dialContext,
 		IdleConnTimeout:    transportDefaultIdleConnTimeout,
 		MaxConnsPerHost:    dohMaxConnsPerHost,
 		MaxIdleConns:       dohMaxIdleConns,
+		// Use system proxy settings from environment variables
+		Proxy: http.ProxyFromEnvironment,
 		// Since we have a custom DialContext, we need to use this field to make
 		// golang http.Client attempt to use HTTP/2. Otherwise, it would only be
 		// used when negotiated on the TLS level.
 		ForceAttemptHTTP2: true,
+	}
+	
+	// Only set custom DialContext if not using proxy
+	if proxyType == ProxyTypeNone && dialContext != nil {
+		transport.DialContext = dialContext
 	}
 
 	// Explicitly configure transport to use HTTP/2.
@@ -719,4 +746,54 @@ func isHTTP3(client *http.Client) (ok bool) {
 	_, ok = client.Transport.(*http3Transport)
 
 	return ok
+}
+
+// ProxyType represents the type of proxy detected
+type ProxyType int
+
+const (
+	ProxyTypeNone ProxyType = iota
+	ProxyTypeHTTP
+	ProxyTypeSOCKS
+)
+
+// detectProxyType checks proxy environment variables and returns the proxy type and URL.
+// It checks HTTP_PROXY, HTTPS_PROXY, and their lowercase versions for HTTP proxies,
+// and ALL_PROXY, all_proxy for SOCKS proxies.
+func detectProxyType() (ProxyType, string) {
+	// Check for HTTP/HTTPS proxies first
+	httpProxies := []string{
+		"HTTP_PROXY", "http_proxy",
+		"HTTPS_PROXY", "https_proxy",
+	}
+	
+	for _, env := range httpProxies {
+		if proxy := os.Getenv(env); proxy != "" {
+			// Determine if it's HTTP or SOCKS by URL scheme
+			if strings.HasPrefix(strings.ToLower(proxy), "socks") {
+				return ProxyTypeSOCKS, proxy
+			}
+			return ProxyTypeHTTP, proxy
+		}
+	}
+	
+	// Check for SOCKS proxies in ALL_PROXY
+	socksProxies := []string{
+		"ALL_PROXY", "all_proxy",
+	}
+	
+	for _, env := range socksProxies {
+		if proxy := os.Getenv(env); proxy != "" {
+			return ProxyTypeSOCKS, proxy
+		}
+	}
+	
+	return ProxyTypeNone, ""
+}
+
+// hasProxyEnvironment checks if any proxy environment variables are set.
+// This function checks for HTTP_PROXY, HTTPS_PROXY, and their lowercase versions.
+func hasProxyEnvironment() bool {
+	proxyType, _ := detectProxyType()
+	return proxyType != ProxyTypeNone
 }
