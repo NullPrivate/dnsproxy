@@ -8,6 +8,8 @@ import (
 	"github.com/miekg/dns"
 )
 
+// TODO(e.burkov):  Consider using wrapped [errors.ErrNoValue] and
+// [errors.ErrEmptyValue] instead.
 const (
 	// ErrNoUpstreams is returned from the methods that expect at least a single
 	// upstream to work with when no upstreams specified.
@@ -25,16 +27,19 @@ func ExchangeParallel(ups []Upstream, req *dns.Msg) (reply *dns.Msg, resolved Up
 	case 0:
 		return nil, nil, ErrNoUpstreams
 	case 1:
-		reply, err = ups[0].Exchange(req)
-
-		return reply, ups[0], err
+		return exchangeSingle(ups[0], req)
 	default:
 		// Go on.
 	}
 
 	resCh := make(chan any, upsNum)
 	for _, f := range ups {
-		go exchangeAsync(f, req, resCh)
+		// Use a copy to prevent data races, as [dns.Client] can modify the DNS
+		// request during the exchange.
+		//
+		// TODO(s.chzhen):  Consider using buffer pool.
+		copyReq := req.Copy()
+		go exchangeAsync(f, copyReq, resCh)
 	}
 
 	errs := []error{}
@@ -58,6 +63,20 @@ func ExchangeParallel(ups []Upstream, req *dns.Msg) (reply *dns.Msg, resolved Up
 	}
 
 	return nil, nil, errors.Join(errs...)
+}
+
+// exchangeSingle returns a successful response and resolver if a DNS lookup was
+// successful.
+func exchangeSingle(
+	ups Upstream,
+	req *dns.Msg,
+) (resp *dns.Msg, resolved Upstream, err error) {
+	resp, err = ups.Exchange(req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resp, ups, err
 }
 
 // ExchangeAllResult is the successful result of [ExchangeAll] for a single
@@ -98,7 +117,12 @@ func ExchangeAll(ups []Upstream, req *dns.Msg) (res []ExchangeAllResult, err err
 
 	// Start exchanging concurrently.
 	for _, u := range ups {
-		go exchangeAsync(u, req, resCh)
+		// Use a copy to prevent data races, as [dns.Client] can modify the DNS
+		// request during the exchange.
+		//
+		// TODO(s.chzhen):  Consider using buffer pool.
+		copyReq := req.Copy()
+		go exchangeAsync(u, copyReq, resCh)
 	}
 
 	// Wait for all exchanges to finish.

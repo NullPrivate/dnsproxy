@@ -1,11 +1,11 @@
 package handler
 
 import (
-	"io/fs"
 	"net"
 	"net/netip"
 	"os"
 	"path"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -33,9 +33,6 @@ func TestMain(m *testing.M) {
 // defaultTimeout is a default timeout for tests and contexts.
 const defaultTimeout = 1 * time.Second
 
-// testdata is the file system for test data.
-var testdata fs.FS = os.DirFS("testdata")
-
 func TestDefault_haltAAAA(t *testing.T) {
 	t.Parallel()
 
@@ -52,13 +49,11 @@ func TestDefault_haltAAAA(t *testing.T) {
 	t.Run("disabled", func(t *testing.T) {
 		t.Parallel()
 
-		hdlr, err := NewDefault(&DefaultConfig{
+		hdlr := NewDefault(&DefaultConfig{
 			Logger:             slogutil.NewDiscardLogger(),
 			MessageConstructor: messages,
 			HaltIPv6:           false,
-			FileSystem:         testdata,
 		})
-		require.NoError(t, err)
 
 		ctx := testutil.ContextWithTimeout(t, defaultTimeout)
 
@@ -69,13 +64,11 @@ func TestDefault_haltAAAA(t *testing.T) {
 	t.Run("enabled", func(t *testing.T) {
 		t.Parallel()
 
-		hdlr, err := NewDefault(&DefaultConfig{
+		hdlr := NewDefault(&DefaultConfig{
 			Logger:             slogutil.NewDiscardLogger(),
 			MessageConstructor: messages,
 			HaltIPv6:           true,
-			FileSystem:         testdata,
 		})
-		require.NoError(t, err)
 
 		ctx := testutil.ContextWithTimeout(t, defaultTimeout)
 
@@ -90,18 +83,23 @@ func TestDefault_resolveFromHosts(t *testing.T) {
 	// TODO(e.burkov):  Use the one from [dnsproxytest].
 	messages := dnsmsg.DefaultMessageConstructor{}
 
-	hdlr, err := NewDefault(&DefaultConfig{
-		MessageConstructor: messages,
-		FileSystem:         testdata,
-		Logger:             slogutil.NewDiscardLogger(),
-		HostsFiles:         []string{path.Join(t.Name(), "hosts")},
-		HaltIPv6:           true,
-	})
+	relPath := path.Join("testdata", t.Name(), "hosts")
+	absPath, err := filepath.Abs(path.Join("testdata", t.Name(), "hosts"))
 	require.NoError(t, err)
 
+	strg, err := ReadHosts([]string{absPath, relPath})
+	require.NoError(t, err)
+
+	hdlr := NewDefault(&DefaultConfig{
+		MessageConstructor: messages,
+		Logger:             slogutil.NewDiscardLogger(),
+		HostsFiles:         strg,
+		HaltIPv6:           true,
+	})
+
 	const (
-		domainV4 = "ipv4.domain.example"
-		domainV6 = "ipv6.domain.example"
+		fqdnV4 = "ipv4.domain.example."
+		fqdnV6 = "ipv6.domain.example."
 	)
 
 	var (
@@ -120,26 +118,26 @@ func TestDefault_resolveFromHosts(t *testing.T) {
 	}{{
 		wantAns: &dns.A{
 			Hdr: dns.RR_Header{
-				Name:   domainV4,
+				Name:   fqdnV4,
 				Rrtype: dns.TypeA,
 				Class:  dns.ClassINET,
 				Ttl:    10,
 			},
 			A: addrV4.AsSlice(),
 		},
-		req:  (&dns.Msg{}).SetQuestion(domainV4, dns.TypeA),
+		req:  (&dns.Msg{}).SetQuestion(fqdnV4, dns.TypeA),
 		name: "success_a",
 	}, {
 		wantAns: &dns.AAAA{
 			Hdr: dns.RR_Header{
-				Name:   domainV6,
+				Name:   fqdnV6,
 				Rrtype: dns.TypeAAAA,
 				Class:  dns.ClassINET,
 				Ttl:    10,
 			},
 			AAAA: addrV6.AsSlice(),
 		},
-		req:  (&dns.Msg{}).SetQuestion(domainV6, dns.TypeAAAA),
+		req:  (&dns.Msg{}).SetQuestion(fqdnV6, dns.TypeAAAA),
 		name: "success_aaaa",
 	}, {
 		wantAns: &dns.PTR{
@@ -149,7 +147,7 @@ func TestDefault_resolveFromHosts(t *testing.T) {
 				Class:  dns.ClassINET,
 				Ttl:    10,
 			},
-			Ptr: domainV4,
+			Ptr: fqdnV4,
 		},
 		req:  (&dns.Msg{}).SetQuestion(reversedV4, dns.TypePTR),
 		name: "success_ptr_v4",
@@ -161,7 +159,7 @@ func TestDefault_resolveFromHosts(t *testing.T) {
 				Class:  dns.ClassINET,
 				Ttl:    10,
 			},
-			Ptr: domainV6,
+			Ptr: fqdnV6,
 		},
 		req:  (&dns.Msg{}).SetQuestion(reversedV6, dns.TypePTR),
 		name: "success_ptr_v6",

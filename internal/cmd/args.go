@@ -62,6 +62,7 @@ const (
 	cacheIdx
 	refuseAnyIdx
 	enableEDNSSubnetIdx
+	pendingRequestsEnabledIdx
 	dns64Idx
 	usePrivateRDNSIdx
 )
@@ -221,11 +222,10 @@ var commandLineOptions = []*commandLineOption{
 		valueType: "subnet",
 	},
 	hostsFilesIdx: {
-		description: "List of paths to the hosts files relative to the root, can be specified " +
-			"multiple times.",
-		long:      "hosts-files",
-		short:     "",
-		valueType: "path",
+		description: "List of paths to the hosts files, can be specified multiple times.",
+		long:        "hosts-files",
+		short:       "",
+		valueType:   "path",
 	},
 	timeoutIdx: {
 		description: "Timeout for outbound DNS queries to remote upstream servers in a " +
@@ -370,6 +370,14 @@ var commandLineOptions = []*commandLineOption{
 		short:       "",
 		valueType:   "",
 	},
+	pendingRequestsEnabledIdx: {
+		description: "If specified, the server will track duplicate queries and only send the " +
+			"first of them to the upstream server, propagating its result to others. " +
+			"Disabling it introduces a vulnerability to cache poisoning attacks.",
+		long:      "pending-requests-enabled",
+		short:     "",
+		valueType: "",
+	},
 	dns64Idx: {
 		description: "If specified, dnsproxy will act as a DNS64 server.",
 		long:        "dns64",
@@ -437,6 +445,7 @@ func parseCmdLineOptions(conf *configuration) (err error) {
 		cacheIdx:                  &conf.Cache,
 		refuseAnyIdx:              &conf.RefuseAny,
 		enableEDNSSubnetIdx:       &conf.EnableEDNSSubnet,
+		pendingRequestsEnabledIdx: &conf.PendingRequestsEnabled,
 		dns64Idx:                  &conf.DNS64,
 		usePrivateRDNSIdx:         &conf.UsePrivateRDNS,
 	} {
@@ -449,6 +458,12 @@ func parseCmdLineOptions(conf *configuration) (err error) {
 	if err != nil {
 		// Don't wrap the error, because it's informative enough as is.
 		return err
+	}
+
+	nonFlags := flags.Args()
+	if len(nonFlags) > 0 {
+		return fmt.Errorf("positional arguments are not allowed, please check your command line "+
+			"arguments; detected positional arguments: %s", nonFlags)
 	}
 
 	return nil
