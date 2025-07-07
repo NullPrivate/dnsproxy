@@ -7,8 +7,8 @@ name: Build
   'push':
     'tags':
       - 'v*'
-    # 'branches':
-    #   - '*'
+    'branches':
+      - '*'
   'pull_request':
 
 

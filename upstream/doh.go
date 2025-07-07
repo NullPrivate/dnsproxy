@@ -442,7 +442,7 @@ func (p *dnsOverHTTPS) createClient() (*http.Client, error) {
 func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 	// Check proxy configuration
 	proxyType, proxyURL := detectProxyType()
-	
+
 	var dialContext bootstrap.DialHandler
 	if proxyType == ProxyTypeNone {
 		// Only use custom DialContext if no proxy is configured
@@ -451,24 +451,17 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 			return nil, fmt.Errorf("bootstrapping %s: %w", p.addrRedacted, err)
 		}
 		p.logger.Debug("no proxy environment detected, using direct connection")
-	} else {
-		switch proxyType {
-		case ProxyTypeHTTP:
-			p.logger.Info("HTTP proxy environment detected, using system proxy settings", "proxy", proxyURL)
-		case ProxyTypeSOCKS:
-			p.logger.Info("SOCKS proxy environment detected, will use for HTTP transport", "proxy", proxyURL)
-		}
 	}
 
 	// First, we attempt to create an HTTP3 transport.  If the probe QUIC
 	// connection is established successfully, we'll be using HTTP3 for this
 	// upstream.
 	tlsConf := p.tlsConf.Clone()
-	
+
 	// Only try HTTP/3 if not using proxy (QUIC doesn't work well with HTTP proxies)
-	if proxyType == ProxyTypeNone || proxyType == ProxyTypeSOCKS {
-		transportH3, err := p.createTransportH3(tlsConf, dialContext)
-		if err == nil {
+	if proxyType == ProxyTypeNone {
+		transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
+		if h3Err == nil {
 			p.logger.Debug("using http/3 for this upstream, quic was faster")
 
 			return transportH3, nil
@@ -487,14 +480,19 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 		IdleConnTimeout:    transportDefaultIdleConnTimeout,
 		MaxConnsPerHost:    dohMaxConnsPerHost,
 		MaxIdleConns:       dohMaxIdleConns,
-		// Use system proxy settings from environment variables
-		Proxy: http.ProxyFromEnvironment,
 		// Since we have a custom DialContext, we need to use this field to make
 		// golang http.Client attempt to use HTTP/2. Otherwise, it would only be
 		// used when negotiated on the TLS level.
 		ForceAttemptHTTP2: true,
 	}
-	
+
+	// Set proxy if it's specified
+	if proxyURL != "" {
+		transport.Proxy = func(req *http.Request) (*url.URL, error) {
+			return url.Parse(proxyURL)
+		}
+	}
+
 	// Only set custom DialContext if not using proxy
 	if proxyType == ProxyTypeNone && dialContext != nil {
 		transport.DialContext = dialContext
@@ -607,6 +605,12 @@ func (p *dnsOverHTTPS) probeH3(
 	tlsConfig *tls.Config,
 	dialContext bootstrap.DialHandler,
 ) (addr string, err error) {
+	if dialContext == nil {
+		// Cannot probe H3 without a bootstrap resolver.  This may happen if
+		// the upstream is specified as an IP address.
+		return "", fmt.Errorf("cannot probe H3 without dial context")
+	}
+
 	// We're using bootstrapped address instead of what's passed to the function
 	// it does not create an actual connection, but it helps us determine
 	// what IP is actually reachable (when there are v4/v6 addresses).
@@ -763,7 +767,7 @@ func detectProxyType() (ProxyType, string) {
 		"HTTP_PROXY", "http_proxy",
 		"HTTPS_PROXY", "https_proxy",
 	}
-	
+
 	for _, env := range httpProxies {
 		if proxy := os.Getenv(env); proxy != "" {
 			// Determine if it's HTTP or SOCKS by URL scheme
@@ -773,17 +777,17 @@ func detectProxyType() (ProxyType, string) {
 			return ProxyTypeHTTP, proxy
 		}
 	}
-	
+
 	// Check for SOCKS proxies in ALL_PROXY
 	socksProxies := []string{
 		"ALL_PROXY", "all_proxy",
 	}
-	
+
 	for _, env := range socksProxies {
 		if proxy := os.Getenv(env); proxy != "" {
 			return ProxyTypeSOCKS, proxy
 		}
 	}
-	
+
 	return ProxyTypeNone, ""
 }
