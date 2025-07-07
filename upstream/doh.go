@@ -467,14 +467,14 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 	
 	// Only try HTTP/3 if not using proxy (QUIC doesn't work well with HTTP proxies)
 	if proxyType == ProxyTypeNone || proxyType == ProxyTypeSOCKS {
-		transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
-		if h3Err == nil {
+		transportH3, err := p.createTransportH3(tlsConf, dialContext)
+		if err == nil {
 			p.logger.Debug("using http/3 for this upstream, quic was faster")
+
 			return transportH3, nil
 		}
-		p.logger.Debug("got error, switching to http/2 for this upstream", slogutil.KeyError, h3Err)
-	} else {
-		p.logger.Debug("proxy detected, skipping http/3 and using http/1.1 or http/2")
+
+		p.logger.Debug("got error, switching to http/2 for this upstream", slogutil.KeyError, err)
 	}
 
 	if !p.supportsHTTP() {
@@ -588,8 +588,9 @@ func (p *dnsOverHTTPS) createTransportH3(
 			_ string,
 			tlsCfg *tls.Config,
 			cfg *quic.Config,
-		) (c *quic.Conn, err error) {
-			return quic.DialAddrEarly(ctx, addr, tlsCfg, cfg)
+		) (c quic.EarlyConnection, err error) {
+			c, err = quic.DialAddrEarly(ctx, addr, tlsCfg, cfg)
+			return c, err
 		},
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig,

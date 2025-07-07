@@ -13,12 +13,10 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/testutil"
@@ -32,9 +30,6 @@ import (
 
 // TODO(d.kolyshev): Remove this after quic-go has migrated to slog.
 func TestMain(m *testing.M) {
-	// See https://github.com/quic-go/quic-go/issues/4228.
-	errors.Check(os.Setenv("QUIC_GO_DISABLE_GSO", "1"))
-
 	testutil.DiscardLogOutput(m)
 }
 
