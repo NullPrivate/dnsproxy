@@ -466,7 +466,7 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 	tlsConf := p.tlsConf.Clone()
 	
 	// Only try HTTP/3 if not using proxy (QUIC doesn't work well with HTTP proxies)
-	if proxyType == ProxyTypeNone {
+	if proxyType == ProxyTypeNone || proxyType == ProxyTypeSOCKS {
 		transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
 		if h3Err == nil {
 			p.logger.Debug("using http/3 for this upstream, quic was faster")
@@ -786,11 +786,4 @@ func detectProxyType() (ProxyType, string) {
 	}
 	
 	return ProxyTypeNone, ""
-}
-
-// hasProxyEnvironment checks if any proxy environment variables are set.
-// This function checks for HTTP_PROXY, HTTPS_PROXY, and their lowercase versions.
-func hasProxyEnvironment() bool {
-	proxyType, _ := detectProxyType()
-	return proxyType != ProxyTypeNone
 }

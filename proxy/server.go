@@ -16,9 +16,8 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// startListeners configures listeners and starts listening each configured
-// address.  If it returns an error, all listeners should be closed manually.
-func (p *Proxy) startListeners(ctx context.Context) (err error) {
+// configureListeners configures listeners.
+func (p *Proxy) configureListeners(ctx context.Context) (err error) {
 	err = p.initUDPListeners(ctx)
 	if err != nil {
 		return err
@@ -52,8 +51,8 @@ func (p *Proxy) startListeners(ctx context.Context) (err error) {
 	return nil
 }
 
-// serveListeners starts serving the configured listeners.
-func (p *Proxy) serveListeners() {
+// startListeners starts listener loops.
+func (p *Proxy) startListeners() {
 	for _, l := range p.udpListen {
 		go p.udpPacketLoop(l, p.requestsSema)
 	}

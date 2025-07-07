@@ -7,7 +7,7 @@ echo
 pkill -f dnsproxy 2>/dev/null || true
 sleep 1
 
-cd /home/test/code/dnsproxy
+cd /home/test/code/adguardprivate/dnsproxy
 
 echo "1. 测试没有代理设置的情况："
 echo "   启动 dnsproxy 不带代理..."

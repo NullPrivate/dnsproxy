@@ -103,7 +103,13 @@ func (p *plainDNS) dialExchange(
 	defer func() { logFinish(p.logger, addr, network, err) }()
 
 	ctx := context.Background()
-	conn.Conn, err = dial(ctx, network, "")
+	proxyType, proxyURL := detectProxyType()
+	if proxyType == ProxyTypeSOCKS {
+		p.logger.Debug("plain detected proxy", "type", proxyType, "url", proxyURL)
+		conn.Conn, err = dial(ctx, network, proxyURL)
+	} else {
+		conn.Conn, err = dial(ctx, network, "")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("dialing %s over %s: %w", p.addr.Host, network, err)
 	}
@@ -111,7 +117,13 @@ func (p *plainDNS) dialExchange(
 
 	resp, _, err = client.ExchangeWithConn(req, conn)
 	if isExpectedConnErr(err) {
-		conn.Conn, err = dial(ctx, network, "")
+		proxyType, proxyURL := detectProxyType()
+		if proxyType == ProxyTypeSOCKS {
+			p.logger.Debug("plain detected proxy", "type", proxyType, "url", proxyURL)
+			conn.Conn, err = dial(ctx, network, proxyURL)
+		} else {
+			conn.Conn, err = dial(ctx, network, "")
+		}
 		if err != nil {
 			return nil, fmt.Errorf("dialing %s over %s again: %w", p.addr.Host, network, err)
 		}

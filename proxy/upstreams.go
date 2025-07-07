@@ -327,15 +327,20 @@ func (p *configParser) includeToReserved(dnsUpstream upstream.Upstream, domains 
 // considered valid if it contains at least a single default upstream.  Empty c
 // causes [upstream.ErrNoUpstreams].
 func (uc *UpstreamConfig) validate() (err error) {
+	const (
+		errNilConf   errors.Error = "upstream config is nil"
+		errNoDefault errors.Error = "no default upstreams specified"
+	)
+
 	switch {
 	case uc == nil:
-		return errors.ErrNoValue
+		return errNilConf
 	case len(uc.Upstreams) > 0:
 		return nil
 	case len(uc.DomainReservedUpstreams) == 0 && len(uc.SpecifiedDomainUpstreams) == 0:
 		return upstream.ErrNoUpstreams
 	default:
-		return fmt.Errorf("default upstreams: %w", errors.ErrNoValue)
+		return errNoDefault
 	}
 }
 

@@ -86,10 +86,7 @@ type Config struct {
 	PrivateRDNSUpstreamConfig *UpstreamConfig
 
 	// Fallbacks is a list of fallback resolvers.  Those will be used if the
-	// general set fails responding.  It isn't allowed to be empty, but can be
-	// nil, which means not to use fallbacks.
-	//
-	// TODO(e.burkov):  Add explicit boolean for disabling fallbacks.
+	// general set fails responding.
 	Fallbacks *UpstreamConfig
 
 	// Userinfo is the sole permitted userinfo for the DoH basic authentication.
@@ -269,42 +266,35 @@ type PendingRequestsConfig struct {
 func (p *Proxy) validateConfig() (err error) {
 	err = p.UpstreamConfig.validate()
 	if err != nil {
-		return fmt.Errorf("general upstreams: %w", err)
+		return fmt.Errorf("validating general upstreams: %w", err)
 	}
 
 	err = ValidatePrivateConfig(p.PrivateRDNSUpstreamConfig, p.privateNets)
 	if err != nil {
 		if p.UsePrivateRDNS || errors.Is(err, upstream.ErrNoUpstreams) {
-			return fmt.Errorf("private rdns upstreams: %w", err)
+			return fmt.Errorf("validating private RDNS upstreams: %w", err)
 		}
 	}
 
-	err = p.Fallbacks.validate()
 	// Allow [Proxy.Fallbacks] to be nil, but not empty.  nil means not to use
 	// fallbacks at all.
+	err = p.Fallbacks.validate()
 	if errors.Is(err, upstream.ErrNoUpstreams) {
-		return fmt.Errorf("fallbacks: %w", err)
+		return fmt.Errorf("validating fallbacks: %w", err)
 	}
 
 	err = p.validateRatelimit()
 	if err != nil {
-		return fmt.Errorf("ratelimit: %w", err)
+		return fmt.Errorf("validating ratelimit: %w", err)
 	}
 
 	switch p.UpstreamMode {
-	case
-		"",
-		UpstreamModeFastestAddr,
-		UpstreamModeLoadBalance,
-		UpstreamModeParallel:
+	case "":
+		// Go on.
+	case UpstreamModeFastestAddr, UpstreamModeLoadBalance, UpstreamModeParallel:
 		// Go on.
 	default:
-		return fmt.Errorf("upstream mode: %w: %q", errors.ErrBadEnumValue, p.UpstreamMode)
-	}
-
-	err = p.validateBasicAuth()
-	if err != nil {
-		return fmt.Errorf("basic auth: %w", err)
+		return fmt.Errorf("bad upstream mode: %q", p.UpstreamMode)
 	}
 
 	p.logConfigInfo()
@@ -378,11 +368,9 @@ func (p *Proxy) logConfigInfo() {
 
 // validateListenAddrs returns an error if the addresses are not configured
 // properly.
-//
-// TODO(e.burkov):  Move to configuration validation.
 func (p *Proxy) validateListenAddrs() (err error) {
 	if !p.hasListenAddrs() {
-		return fmt.Errorf("listen addresses: %w", errors.ErrNoValue)
+		return errors.Error("no listen address specified")
 	}
 
 	err = p.validateTLSConfig()

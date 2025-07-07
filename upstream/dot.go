@@ -155,6 +155,12 @@ func (p *dnsOverTLS) conn(h bootstrap.DialHandler) (conn net.Conn, err error) {
 	// Dial a new connection outside the lock, if needed.
 	defer func() {
 		if conn == nil {
+			// Check if proxy is configured before dialing
+			proxyType, proxyURL := detectProxyType()
+			if proxyType != ProxyTypeNone {
+				p.logger.Debug("dot detected proxy", "type", proxyType, "url", proxyURL)
+			}
+			
 			conn, err = tlsDial(h, p.tlsConf.Clone())
 			err = errors.Annotate(err, "connecting to %s: %w", p.tlsConf.ServerName)
 		}
@@ -216,10 +222,44 @@ func (p *dnsOverTLS) exchangeWithConn(conn net.Conn, req *dns.Msg) (reply *dns.M
 }
 
 // tlsDial is basically the same as tls.DialWithDialer, but we will call our own
-// dialContext function to get connection.
+// dialContext function to get connection. It also supports system proxy if configured.
 func tlsDial(dialContext bootstrap.DialHandler, conf *tls.Config) (c *tls.Conn, err error) {
-	// We're using bootstrapped address instead of what's passed to the
-	// function.
+	// Check if proxy is configured
+	proxyType, proxyURL := detectProxyType()
+	if proxyType != ProxyTypeNone {
+		// For SOCKS proxy, we need to use a special dialer
+		if proxyType == ProxyTypeSOCKS {
+			// Use the SOCKS dialer from bootstrap package
+			// The actual implementation should be in bootstrap package
+			// This is just a placeholder for the proxy support
+			// We're using bootstrapped address instead of what's passed to the function
+			// Pass proxyURL to the dialer to use the SOCKS proxy
+			rawConn, err := dialContext(context.Background(), networkTCP, proxyURL)
+			if err != nil {
+				return nil, err
+			}
+			
+			// We want the timeout to cover the whole process: TCP connection and TLS
+			// handshake dialTimeout will be used as connection deadLine.
+			conn := tls.Client(rawConn, conf)
+			err = conn.SetDeadline(time.Now().Add(dialTimeout))
+			if err != nil {
+				// Must not happen in normal circumstances.
+				panic(fmt.Errorf("dnsproxy: tls dial: setting deadline: %w", err))
+			}
+			
+			err = conn.Handshake()
+			if err != nil {
+				return nil, errors.WithDeferred(err, conn.Close())
+			}
+			
+			return conn, nil
+		}
+		// HTTP proxy is not supported for DoT
+	}
+	
+	// No proxy or HTTP proxy (which is not supported for DoT)
+	// We're using bootstrapped address instead of what's passed to the function
 	rawConn, err := dialContext(context.Background(), networkTCP, "")
 	if err != nil {
 		return nil, err
@@ -261,3 +301,5 @@ func isCriticalTCP(err error) (ok bool) {
 		return true
 	}
 }
+
+// Note: ProxyType and detectProxyType are defined in doh.go

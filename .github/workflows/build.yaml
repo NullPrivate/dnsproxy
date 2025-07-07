@@ -11,13 +11,15 @@ name: Build
     #   - '*'
   'pull_request':
 
+
+permissions:
+  contents: write
+  pull-requests: write
+  repository-projects: write
+
 jobs:
   tests:
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
-      pull-requests: write
-      repository-projects: write
     strategy:
       matrix:
         os:
@@ -66,7 +68,7 @@ jobs:
         id: create_release
         uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         with:
           tag_name: ${{ github.ref }}
           release_name: Release ${{ github.ref }}
