@@ -626,6 +626,11 @@ func (p *dnsOverHTTPS) probeH3(
 		return "", fmt.Errorf("not a UDP connection to %s", p.addrRedacted)
 	}
 
+	if udpConn.RemoteAddr() == nil {
+		// This may happen if the bootstrap resolver is misconfigured.
+		return "", fmt.Errorf("no remote address on probe connection for %s", p.addrRedacted)
+	}
+
 	addr = udpConn.RemoteAddr().String()
 
 	// Avoid spending time on probing if this upstream only supports HTTP/3.
@@ -705,7 +710,7 @@ func (p *dnsOverHTTPS) probeQUIC(addr string, tlsConfig *tls.Config, ch chan err
 func (p *dnsOverHTTPS) probeTLS(dialContext bootstrap.DialHandler, tlsConfig *tls.Config, ch chan error) {
 	startTime := time.Now()
 
-	conn, err := tlsDial(dialContext, tlsConfig)
+	conn, err := tlsDial(dialContext, tlsConfig, "")
 	if err != nil {
 		ch <- fmt.Errorf("opening TLS connection: %w", err)
 		return

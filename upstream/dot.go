@@ -17,6 +17,7 @@ import (
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/miekg/dns"
+	"golang.org/x/net/proxy"
 )
 
 // dialTimeout is the global timeout for establishing a TLS connection.
@@ -110,7 +111,7 @@ func (p *dnsOverTLS) Exchange(req *dns.Msg) (reply *dns.Msg, err error) {
 		p.logger.Debug("dot got bad conn from pool", "addr", p.addr, slogutil.KeyError, err)
 
 		// Retry.
-		conn, err = tlsDial(h, p.tlsConf.Clone())
+		conn, err = tlsDial(h, p.tlsConf.Clone(), p.addr.Host)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"dialing %s: connecting to %s: %w",
@@ -155,16 +156,20 @@ func (p *dnsOverTLS) conn(h bootstrap.DialHandler) (conn net.Conn, err error) {
 	// Dial a new connection outside the lock, if needed.
 	defer func() {
 		if conn == nil {
-			// Check if proxy is configured before dialing
-			proxyType, proxyURL := detectProxyType()
-			if proxyType != ProxyTypeNone {
-				p.logger.Debug("dot detected proxy", "type", proxyType, "url", proxyURL)
-			}
-			
-			conn, err = tlsDial(h, p.tlsConf.Clone())
+			conn, err = tlsDial(h, p.tlsConf.Clone(), p.addr.Host)
 			err = errors.Annotate(err, "connecting to %s: %w", p.tlsConf.ServerName)
 		}
 	}()
+
+	// Check for proxy settings.
+	proxyType, _ := detectProxyType()
+	if proxyType == ProxyTypeSOCKS {
+		// If a SOCKS proxy is configured, we cannot safely reuse connections
+		// from the pool as we don't know if they were created with the same
+		// proxy settings. The safest approach is to always dial a new
+		// connection.
+		return nil, nil
+	}
 
 	p.connsMu.Lock()
 	defer p.connsMu.Unlock()
@@ -223,46 +228,42 @@ func (p *dnsOverTLS) exchangeWithConn(conn net.Conn, req *dns.Msg) (reply *dns.M
 
 // tlsDial is basically the same as tls.DialWithDialer, but we will call our own
 // dialContext function to get connection. It also supports system proxy if configured.
-func tlsDial(dialContext bootstrap.DialHandler, conf *tls.Config) (c *tls.Conn, err error) {
-	// Check if proxy is configured
-	proxyType, proxyURL := detectProxyType()
-	if proxyType != ProxyTypeNone {
-		// For SOCKS proxy, we need to use a special dialer
-		if proxyType == ProxyTypeSOCKS {
-			// Use the SOCKS dialer from bootstrap package
-			// The actual implementation should be in bootstrap package
-			// This is just a placeholder for the proxy support
-			// We're using bootstrapped address instead of what's passed to the function
-			// Pass proxyURL to the dialer to use the SOCKS proxy
-			rawConn, err := dialContext(context.Background(), networkTCP, proxyURL)
-			if err != nil {
-				return nil, err
-			}
-			
-			// We want the timeout to cover the whole process: TCP connection and TLS
-			// handshake dialTimeout will be used as connection deadLine.
-			conn := tls.Client(rawConn, conf)
-			err = conn.SetDeadline(time.Now().Add(dialTimeout))
-			if err != nil {
-				// Must not happen in normal circumstances.
-				panic(fmt.Errorf("dnsproxy: tls dial: setting deadline: %w", err))
-			}
-			
-			err = conn.Handshake()
-			if err != nil {
-				return nil, errors.WithDeferred(err, conn.Close())
-			}
-			
-			return conn, nil
+func tlsDial(dialContext bootstrap.DialHandler, conf *tls.Config, upstreamAddr string) (c *tls.Conn, err error) {
+	proxyType, proxyURLStr := detectProxyType()
+
+	var rawConn net.Conn
+	if proxyType == ProxyTypeSOCKS {
+		// Use SOCKS proxy, bypass bootstrap dialer.
+		// This is consistent with doh.go's behavior of not using bootstrap
+		// resolver when a proxy is configured.
+		proxyURL, err := url.Parse(proxyURLStr)
+		if err != nil {
+			return nil, fmt.Errorf("parsing proxy url: %w", err)
 		}
-		// HTTP proxy is not supported for DoT
-	}
-	
-	// No proxy or HTTP proxy (which is not supported for DoT)
-	// We're using bootstrapped address instead of what's passed to the function
-	rawConn, err := dialContext(context.Background(), networkTCP, "")
-	if err != nil {
-		return nil, err
+
+		dialer, err := proxy.FromURL(proxyURL, proxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("creating proxy dialer: %w", err)
+		}
+
+		rawConn, err = dialer.Dial(networkTCP, upstreamAddr)
+		if err != nil {
+			return nil, fmt.Errorf("dialing via proxy: %w", err)
+		}
+	} else if dialContext != nil {
+		// No SOCKS proxy, use the bootstrap dialer as usual.
+		rawConn, err = dialContext(context.Background(), networkTCP, "")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// This may happen if we're dialing to an IP address, so we can use
+		// the standard net.Dialer.
+		var d net.Dialer
+		rawConn, err = d.DialContext(context.Background(), networkTCP, upstreamAddr)
+		if err != nil {
+			return nil, fmt.Errorf("dialing upstream address: %w", err)
+		}
 	}
 
 	// We want the timeout to cover the whole process: TCP connection and TLS
@@ -271,6 +272,7 @@ func tlsDial(dialContext bootstrap.DialHandler, conf *tls.Config) (c *tls.Conn, 
 	err = conn.SetDeadline(time.Now().Add(dialTimeout))
 	if err != nil {
 		// Must not happen in normal circumstances.
+		_ = conn.Close()
 		panic(fmt.Errorf("dnsproxy: tls dial: setting deadline: %w", err))
 	}
 
@@ -301,5 +303,3 @@ func isCriticalTCP(err error) (ok bool) {
 		return true
 	}
 }
-
-// Note: ProxyType and detectProxyType are defined in doh.go
