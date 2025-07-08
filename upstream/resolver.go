@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
-	"github.com/AdguardTeam/dnsproxy/proxyutil"
+	"github.com/AdGuardPrivate/dnsproxy/internal/bootstrap"
+	"github.com/AdGuardPrivate/dnsproxy/proxyutil"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/miekg/dns"
 )

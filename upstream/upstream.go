@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
+	"github.com/AdGuardPrivate/dnsproxy/internal/bootstrap"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"
@@ -239,7 +239,7 @@ func validateUpstreamURL(u *url.URL) (err error) {
 	if l := len(host); l >= minEnclosedIPv6Len && host[0] == '[' && host[l-1] == ']' {
 		// Might be an IPv6 address enclosed in square brackets with no port.
 		//
-		// See https://github.com/AdguardTeam/dnsproxy/issues/379.
+		// See https://github.com/AdGuardPrivate/dnsproxy/issues/379.
 		possibleIP = host[1 : l-1]
 	}
 	if netutil.IsValidIPString(possibleIP) {

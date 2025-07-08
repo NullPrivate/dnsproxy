@@ -1,8 +1,8 @@
 # DNS Proxy <!-- omit in toc -->
 
 [![Code Coverage](https://img.shields.io/codecov/c/github/AdguardTeam/dnsproxy/master.svg)](https://codecov.io/github/AdguardTeam/dnsproxy?branch=master)
-[![Go Report Card](https://goreportcard.com/badge/github.com/AdguardTeam/dnsproxy)](https://goreportcard.com/report/AdguardTeam/dnsproxy)
-[![Go Doc](https://godoc.org/github.com/AdguardTeam/dnsproxy?status.svg)](https://godoc.org/github.com/AdguardTeam/dnsproxy)
+[![Go Report Card](https://goreportcard.com/badge/github.com/AdGuardPrivate/dnsproxy)](https://goreportcard.com/report/AdguardTeam/dnsproxy)
+[![Go Doc](https://godoc.org/github.com/AdGuardPrivate/dnsproxy?status.svg)](https://godoc.org/github.com/AdGuardPrivate/dnsproxy)
 
 A simple DNS proxy server that supports all existing DNS protocols including
 `DNS-over-TLS`, `DNS-over-HTTPS`, `DNSCrypt`, and `DNS-over-QUIC`. Moreover,
@@ -32,7 +32,7 @@ There are several options how to install `dnsproxy`.
 2. Use the [official Docker image][docker].
 3. Build it yourself (see the instruction below).
 
-[releases]: https://github.com/AdguardTeam/dnsproxy/releases
+[releases]: https://github.com/AdGuardPrivate/dnsproxy/releases
 [docker]: https://hub.docker.com/r/adguard/dnsproxy
 
 ## How to build
