@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/AdGuardPrivate/dnsproxy/internal/bootstrap"
+	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/syncutil"

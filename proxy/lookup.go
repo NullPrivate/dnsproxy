@@ -5,8 +5,8 @@ import (
 	"net/netip"
 	"slices"
 
-	"github.com/AdGuardPrivate/dnsproxy/proxyutil"
-	"github.com/AdGuardPrivate/dnsproxy/upstream"
+	"github.com/AdguardTeam/dnsproxy/proxyutil"
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"

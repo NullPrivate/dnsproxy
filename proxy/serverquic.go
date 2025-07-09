@@ -10,8 +10,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/AdGuardPrivate/dnsproxy/internal/bootstrap"
-	"github.com/AdGuardPrivate/dnsproxy/proxyutil"
+	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
+	"github.com/AdguardTeam/dnsproxy/proxyutil"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"

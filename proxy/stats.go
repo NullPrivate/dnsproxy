@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/AdGuardPrivate/dnsproxy/upstream"
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/miekg/dns"
 )
 

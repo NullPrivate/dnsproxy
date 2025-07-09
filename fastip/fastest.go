@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AdGuardPrivate/dnsproxy/upstream"
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/cache"
 	"github.com/AdguardTeam/golibs/container"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"

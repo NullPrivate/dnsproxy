@@ -1,4 +1,4 @@
-module github.com/AdGuardPrivate/dnsproxy
+module github.com/AdguardTeam/dnsproxy
 
 go 1.24.2
 

@@ -1,9 +1,9 @@
 package dnsproxytest_test
 
 import (
-	"github.com/AdGuardPrivate/dnsproxy/internal/dnsmsg"
-	"github.com/AdGuardPrivate/dnsproxy/internal/dnsproxytest"
-	"github.com/AdGuardPrivate/dnsproxy/upstream"
+	"github.com/AdguardTeam/dnsproxy/internal/dnsmsg"
+	"github.com/AdguardTeam/dnsproxy/internal/dnsproxytest"
+	"github.com/AdguardTeam/dnsproxy/upstream"
 )
 
 // type checks

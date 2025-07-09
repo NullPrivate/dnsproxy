@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AdGuardPrivate/dnsproxy/proxyutil"
+	"github.com/AdguardTeam/dnsproxy/proxyutil"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/testutil"
@@ -105,7 +105,7 @@ func TestUpstream_Exchange_quicServerCloseConn(t *testing.T) {
 
 	// Now run several queries in parallel to check that the error from the
 	// following issue is not happening:
-	// https://github.com/AdGuardPrivate/dnsproxy/issues/389.
+	// https://github.com/AdguardTeam/dnsproxy/issues/389.
 	//
 	// Run 10 queries in parallel as the initial testing showed that this is
 	// enough to trigger the race issue.
