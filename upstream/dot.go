@@ -229,55 +229,69 @@ func (p *dnsOverTLS) exchangeWithConn(conn net.Conn, req *dns.Msg) (reply *dns.M
 // tlsDial is basically the same as tls.DialWithDialer, but we will call our own
 // dialContext function to get connection. It also supports system proxy if configured.
 func tlsDial(dialContext bootstrap.DialHandler, conf *tls.Config, upstreamAddr string) (c *tls.Conn, err error) {
+	rawConn, err := dialTCPWithOptionalProxy(dialContext, upstreamAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	return performTLSHandshake(rawConn, conf)
+}
+
+// dialTCPWithOptionalProxy 根据系统代理设置选择 SOCKS 代理或引导拨号或直接拨号。
+func dialTCPWithOptionalProxy(dialContext bootstrap.DialHandler, upstreamAddr string) (net.Conn, error) {
 	proxyType, proxyURLStr := detectProxyType()
 
-	var rawConn net.Conn
 	if proxyType == ProxyTypeSOCKS {
-		// Use SOCKS proxy, bypass bootstrap dialer.
-		// This is consistent with doh.go's behavior of not using bootstrap
-		// resolver when a proxy is configured.
-		proxyURL, err := url.Parse(proxyURLStr)
-		if err != nil {
-			return nil, fmt.Errorf("parsing proxy url: %w", err)
-		}
+		return dialViaSocksProxy(proxyURLStr, upstreamAddr)
+	}
 
-		dialer, err := proxy.FromURL(proxyURL, proxy.Direct)
-		if err != nil {
-			return nil, fmt.Errorf("creating proxy dialer: %w", err)
-		}
-
-		rawConn, err = dialer.Dial(networkTCP, upstreamAddr)
-		if err != nil {
-			return nil, fmt.Errorf("dialing via proxy: %w", err)
-		}
-	} else if dialContext != nil {
-		// No SOCKS proxy, use the bootstrap dialer as usual.
-		rawConn, err = dialContext(context.Background(), networkTCP, "")
+	if dialContext != nil {
+		rawConn, err := dialContext(context.Background(), networkTCP, "")
 		if err != nil {
 			return nil, err
 		}
-	} else {
-		// This may happen if we're dialing to an IP address, so we can use
-		// the standard net.Dialer.
-		var d net.Dialer
-		rawConn, err = d.DialContext(context.Background(), networkTCP, upstreamAddr)
-		if err != nil {
-			return nil, fmt.Errorf("dialing upstream address: %w", err)
-		}
+
+		return rawConn, nil
 	}
 
-	// We want the timeout to cover the whole process: TCP connection and TLS
-	// handshake dialTimeout will be used as connection deadLine.
-	conn := tls.Client(rawConn, conf)
-	err = conn.SetDeadline(time.Now().Add(dialTimeout))
+	var d net.Dialer
+	rawConn, err := d.DialContext(context.Background(), networkTCP, upstreamAddr)
 	if err != nil {
-		// Must not happen in normal circumstances.
+		return nil, fmt.Errorf("dialing upstream address: %w", err)
+	}
+
+	return rawConn, nil
+}
+
+// dialViaSocksProxy 使用 SOCKS 代理拨号 TCP 连接。
+func dialViaSocksProxy(proxyURLStr, upstreamAddr string) (net.Conn, error) {
+	proxyURL, err := url.Parse(proxyURLStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing proxy url: %w", err)
+	}
+
+	dialer, err := proxy.FromURL(proxyURL, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("creating proxy dialer: %w", err)
+	}
+
+	rawConn, err := dialer.Dial(networkTCP, upstreamAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dialing via proxy: %w", err)
+	}
+
+	return rawConn, nil
+}
+
+// performTLSHandshake 将超时应用于连接并完成 TLS 握手。
+func performTLSHandshake(rawConn net.Conn, conf *tls.Config) (*tls.Conn, error) {
+	conn := tls.Client(rawConn, conf)
+	if err := conn.SetDeadline(time.Now().Add(dialTimeout)); err != nil {
 		_ = conn.Close()
 		panic(fmt.Errorf("dnsproxy: tls dial: setting deadline: %w", err))
 	}
 
-	err = conn.Handshake()
-	if err != nil {
+	if err := conn.Handshake(); err != nil {
 		return nil, errors.WithDeferred(err, conn.Close())
 	}
 

@@ -440,17 +440,22 @@ func (p *dnsOverHTTPS) createClient() (*http.Client, error) {
 // HTTP3 is enabled in the upstream options).  If this attempt is successful,
 // it returns an HTTP3 transport, otherwise it returns the H1/H2 transport.
 func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
-	// Check proxy configuration
-	proxyType, proxyURL := detectProxyType()
+	// Detect proxy via system environment for this upstream URL.
+	reqForProxy := &http.Request{URL: p.addr}
+	proxyForReq, _ := http.ProxyFromEnvironment(reqForProxy)
+	useProxy := proxyForReq != nil
 
-	var dialContext bootstrap.DialHandler
-	if proxyType == ProxyTypeNone {
-		// Only use custom DialContext if no proxy is configured
-		dialContext, err = p.getDialer()
-		if err != nil {
-			return nil, fmt.Errorf("bootstrapping %s: %w", p.addrRedacted, err)
+	// Prepare bootstrap dialer. Needed for HTTP/3 probing and direct H1/H2.
+	dialContext, dialErr := p.getDialer()
+	if !useProxy {
+		if dialErr != nil {
+			return nil, fmt.Errorf("bootstrapping %s: %w", p.addrRedacted, dialErr)
 		}
 		p.logger.Debug("no proxy environment detected, using direct connection")
+	} else if dialErr != nil {
+		p.logger.Debug("proxy environment detected, http/3 probing may be unavailable", slogutil.KeyError, dialErr)
+	} else {
+		p.logger.Debug("proxy environment detected, http/1.1 and http/2 will use proxy")
 	}
 
 	// First, we attempt to create an HTTP3 transport.  If the probe QUIC
@@ -458,17 +463,15 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 	// upstream.
 	tlsConf := p.tlsConf.Clone()
 
-	// Only try HTTP/3 if not using proxy (QUIC doesn't work well with HTTP proxies)
-	if proxyType == ProxyTypeNone {
-		transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
-		if h3Err == nil {
-			p.logger.Debug("using http/3 for this upstream, quic was faster")
+	// Try HTTP/3 first. HTTP/3 path does not use HTTP proxies.
+	transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
+	if h3Err == nil {
+		p.logger.Debug("using http/3 for this upstream, quic was faster")
 
-			return transportH3, nil
-		}
-
-		p.logger.Debug("got error, switching to http/2 for this upstream", slogutil.KeyError, err)
+		return transportH3, nil
 	}
+
+	p.logger.Debug("got error, switching to http/2 for this upstream", slogutil.KeyError, h3Err)
 
 	if !p.supportsHTTP() {
 		return nil, errors.Error("HTTP1/1 and HTTP2 are not supported by this upstream")
@@ -486,15 +489,11 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 		ForceAttemptHTTP2: true,
 	}
 
-	// Set proxy if it's specified
-	if proxyURL != "" {
-		transport.Proxy = func(req *http.Request) (*url.URL, error) {
-			return url.Parse(proxyURL)
-		}
-	}
+	// Use system proxy settings for HTTP/1.1 and HTTP/2
+	transport.Proxy = http.ProxyFromEnvironment
 
 	// Only set custom DialContext if not using proxy
-	if proxyType == ProxyTypeNone && dialContext != nil {
+	if !useProxy && dialContext != nil {
 		transport.DialContext = dialContext
 	}
 
@@ -605,12 +604,38 @@ func (p *dnsOverHTTPS) probeH3(
 	tlsConfig *tls.Config,
 	dialContext bootstrap.DialHandler,
 ) (addr string, err error) {
+	if err = p.ensureDialer(dialContext); err != nil {
+		return "", err
+	}
+
+	addr, err = p.probeBootstrapAddr(dialContext)
+	if err != nil {
+		return "", err
+	}
+
+	// Avoid spending time on probing if this upstream only supports HTTP/3.
+	if p.supportsH3() && !p.supportsHTTP() {
+		return addr, nil
+	}
+
+	probeTLSCfg := p.prepareProbeTLSConfig(tlsConfig)
+
+	return p.runProbeRace(addr, dialContext, probeTLSCfg)
+}
+
+// ensureDialer checks that the bootstrap dialer is available for probing.
+func (p *dnsOverHTTPS) ensureDialer(dialContext bootstrap.DialHandler) error {
 	if dialContext == nil {
 		// Cannot probe H3 without a bootstrap resolver.  This may happen if
 		// the upstream is specified as an IP address.
-		return "", fmt.Errorf("cannot probe H3 without dial context")
+		return fmt.Errorf("cannot probe H3 without dial context")
 	}
 
+	return nil
+}
+
+// probeBootstrapAddr returns a reachable UDP remote address using the bootstrap dialer.
+func (p *dnsOverHTTPS) probeBootstrapAddr(dialContext bootstrap.DialHandler) (string, error) {
 	// We're using bootstrapped address instead of what's passed to the function
 	// it does not create an actual connection, but it helps us determine
 	// what IP is actually reachable (when there are v4/v6 addresses).
@@ -631,13 +656,11 @@ func (p *dnsOverHTTPS) probeH3(
 		return "", fmt.Errorf("no remote address on probe connection for %s", p.addrRedacted)
 	}
 
-	addr = udpConn.RemoteAddr().String()
+	return udpConn.RemoteAddr().String(), nil
+}
 
-	// Avoid spending time on probing if this upstream only supports HTTP/3.
-	if p.supportsH3() && !p.supportsHTTP() {
-		return addr, nil
-	}
-
+// prepareProbeTLSConfig creates a TLS config for probe connections that won't affect existing cache.
+func (p *dnsOverHTTPS) prepareProbeTLSConfig(tlsConfig *tls.Config) *tls.Config {
 	// Use a new *tls.Config with empty session cache for probe connections.
 	// Surprisingly, this is really important since otherwise it invalidates
 	// the existing cache.
@@ -651,6 +674,11 @@ func (p *dnsOverHTTPS) probeH3(
 	probeTLSCfg.VerifyPeerCertificate = nil
 	probeTLSCfg.VerifyConnection = nil
 
+	return probeTLSCfg
+}
+
+// runProbeRace runs QUIC and TLS probes in parallel and returns the preferred protocol's address.
+func (p *dnsOverHTTPS) runProbeRace(addr string, dialContext bootstrap.DialHandler, probeTLSCfg *tls.Config) (string, error) {
 	// Run probeQUIC and probeTLS in parallel and see which one is faster.
 	chQUIC := make(chan error, 1)
 	chTLS := make(chan error, 1)

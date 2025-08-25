@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/AdguardTeam/golibs/errors"
@@ -106,36 +107,9 @@ func (p *Proxy) handleDNSRequest(d *DNSContext) (err error) {
 		return nil
 	}
 
-	// ratelimit based on IP only, protects CPU cycles and outbound connections
-	//
-	// TODO(e.burkov):  Investigate if written above true and move to UDP server
-	// implementation?
-	if p.isRatelimited(ip) {
-		p.logger.Debug("ratelimited based on ip only", "addr", d.Addr)
-
-		switch d.Proto {
-		case ProtoUDP:
-			// Don't reply to ratelimited clients.
-			return nil
-		case ProtoTCP, ProtoTLS:
-			d.Res = p.messages.NewMsgRateLimited(d.Req)
-			p.respond(d)
-			return nil
-		case ProtoHTTPS:
-			w := d.HTTPResponseWriter
-			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
-			return nil
-		case ProtoDNSCrypt:
-			p.respond(d)
-			return nil
-		case ProtoQUIC:
-			if d.QUICConnection != nil {
-				d.QUICConnection.CloseWithError(0x4, "Rate limited")
-			}
-			return nil
-		default:
-			return fmt.Errorf("SHOULD NOT HAPPEN - unknown protocol: %s", d.Proto)
-		}
+	// 基于 IP 的限流处理，拆分为独立函数以降低复杂度。
+	if p.tryHandleRateLimit(d, ip) {
+		return nil
 	}
 
 	d.Res = p.validateRequest(d)
@@ -151,6 +125,45 @@ func (p *Proxy) handleDNSRequest(d *DNSContext) (err error) {
 	p.respond(d)
 
 	return err
+}
+
+// tryHandleRateLimit 处理基于客户端 IP 的限流逻辑。
+// 返回 true 表示已处理（可能已响应），无需继续后续流程。
+func (p *Proxy) tryHandleRateLimit(d *DNSContext, ip netip.Addr) (handled bool) {
+	// ratelimit based on IP only, protects CPU cycles and outbound connections
+	//
+	// TODO(e.burkov):  Investigate if written above true and move to UDP server
+	// implementation?
+	if !p.isRatelimited(ip) {
+		return false
+	}
+
+	p.logger.Debug("ratelimited based on ip only", "addr", d.Addr)
+
+	switch d.Proto {
+	case ProtoUDP:
+		// Don't reply to ratelimited clients.
+		return true
+	case ProtoTCP, ProtoTLS:
+		d.Res = p.messages.NewMsgRateLimited(d.Req)
+		p.respond(d)
+		return true
+	case ProtoHTTPS:
+		w := d.HTTPResponseWriter
+		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+		return true
+	case ProtoDNSCrypt:
+		p.respond(d)
+		return true
+	case ProtoQUIC:
+		if d.QUICConnection != nil {
+			_ = d.QUICConnection.CloseWithError(0x4, "Rate limited")
+		}
+		return true
+	default:
+		// 未知协议交由上层保持原有错误处理逻辑。
+		return false
+	}
 }
 
 // validateRequest returns a response for invalid request or nil if the request
