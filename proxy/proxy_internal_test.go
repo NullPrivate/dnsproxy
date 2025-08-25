@@ -592,6 +592,33 @@ func TestProxy_Resolve_dnssecCache(t *testing.T) {
 func TestExchangeWithReservedDomains(t *testing.T) {
 	t.Parallel()
 
+	// 使用本地模拟上游，避免依赖外部网络。
+	successHandler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		resp := (&dns.Msg{}).SetReply(r)
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.RR_Header{
+				Name:   r.Question[0].Name,
+				Rrtype: dns.TypeA,
+				Class:  dns.ClassINET,
+				Ttl:    defaultTestTTL,
+			},
+			A: net.IPv4(8, 8, 8, 8),
+		})
+		require.NoError(testutil.PanicT{}, w.WriteMsg(resp))
+	})
+	failHandler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		require.NoError(testutil.PanicT{}, w.WriteMsg(&dns.Msg{}))
+	})
+
+	successAddr := (&url.URL{
+		Scheme: string(ProtoTCP),
+		Host:   newLocalUpstreamListener(t, 0, successHandler).String(),
+	}).String()
+	failAddr := (&url.URL{
+		Scheme: string(ProtoTCP),
+		Host:   newLocalUpstreamListener(t, 0, failHandler).String(),
+	}).String()
+
 	dnsProxy := mustNew(t, &Config{
 		Logger:        slogutil.NewDiscardLogger(),
 		UDPListenAddr: []*net.UDPAddr{net.UDPAddrFromAddrPort(localhostAnyPort)},
@@ -599,10 +626,10 @@ func TestExchangeWithReservedDomains(t *testing.T) {
 		UpstreamConfig: newTestUpstreamConfigWithBoot(
 			t,
 			testTimeout,
-			"[/adguard.com/]1.2.3.4",
-			"[/google.ru/]2.3.4.5",
+			"[/adguard.com/]"+failAddr,
+			"[/google.ru/]"+failAddr,
 			"[/maps.google.ru/]#",
-			"1.1.1.1",
+			successAddr,
 		),
 		TrustedProxies:         defaultTrustedProxies,
 		RatelimitSubnetLenIPv4: 24,
@@ -619,40 +646,33 @@ func TestExchangeWithReservedDomains(t *testing.T) {
 	conn, err := dns.Dial("tcp", addr.String())
 	require.NoError(t, err)
 
-	// Create google-a test message.
+	// 先确认默认上游工作正常。
 	req := newTestMessage()
 	err = conn.WriteMsg(req)
 	require.NoError(t, err)
 
-	// Make sure that dnsproxy is working.
 	res, err := conn.ReadMsg()
 	require.NoError(t, err)
 	requireResponse(t, req, res)
 
-	// Create adguard.com test message.
+	// /adguard.com/ 命中失败上游，应无答案。
 	req = newHostTestMessage("adguard.com")
 	err = conn.WriteMsg(req)
 	require.NoError(t, err)
-
-	// Test message should not be resolved.
 	res, _ = conn.ReadMsg()
 	require.Nil(t, res.Answer)
 
-	// Create www.google.ru test message.
+	// /google.ru/ 命中失败上游，应为空答案。
 	req = newHostTestMessage("www.google.ru")
 	err = conn.WriteMsg(req)
 	require.NoError(t, err)
-
-	// Test message should not be resolved.
 	res, _ = conn.ReadMsg()
 	require.Empty(t, res.Answer)
 
-	// Create maps.google.ru test message.
+	// maps.google.ru 被排除，应走默认上游并得到答案。
 	req = newHostTestMessage("maps.google.ru")
 	err = conn.WriteMsg(req)
 	require.NoError(t, err)
-
-	// Test message should be resolved.
 	res, _ = conn.ReadMsg()
 	require.NotNil(t, res.Answer)
 }

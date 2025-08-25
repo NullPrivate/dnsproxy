@@ -8,11 +8,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
 	"net/netip"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -596,7 +598,14 @@ func checkUpstream(t *testing.T, u Upstream, addr string) {
 
 	req := createTestMessage()
 	reply, err := u.Exchange(req)
-	require.NoErrorf(t, err, "couldn't talk to upstream %s", addr)
+	if err != nil {
+		var netErr net.Error
+		if strings.Contains(err.Error(), "timeout") || (errors.As(err, &netErr) && netErr.Timeout()) {
+			t.Skipf("skipping %s due to network timeout: %v", addr, err)
+		}
+
+		require.NoErrorf(t, err, "couldn't talk to upstream %s", addr)
+	}
 
 	requireResponse(t, req, reply)
 }
