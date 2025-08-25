@@ -52,11 +52,25 @@ func TestNewUpstreamResolver_validity(t *testing.T) {
 		Timeout: 3 * time.Second,
 	}
 
-	testCases := []struct {
-		name       string
-		addr       string
-		wantErrMsg string
-	}{{
+	testCases := newUpstreamResolverTestCases()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runUpstreamResolverTest(t, tc, withTimeoutOpt)
+		})
+	}
+}
+
+// testCase represents a single test case for upstream resolver validation.
+type testCase struct {
+	name       string
+	addr       string
+	wantErrMsg string
+}
+
+// newUpstreamResolverTestCases returns test cases for upstream resolver validation.
+func newUpstreamResolverTestCases() []testCase {
+	return []testCase{{
 		name:       "udp",
 		addr:       "1.1.1.1:53",
 		wantErrMsg: "",
@@ -97,33 +111,43 @@ func TestNewUpstreamResolver_validity(t *testing.T) {
 		wantErrMsg: `not a bootstrap: ParseAddr("dns.adguard.com"): ` +
 			`unexpected character (at "dns.adguard.com")`,
 	}}
+}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			r, err := upstream.NewUpstreamResolver(tc.addr, withTimeoutOpt)
-			if tc.wantErrMsg != "" {
-				assert.Equal(t, tc.wantErrMsg, err.Error())
-				if nberr := (&upstream.NotBootstrapError{}); errors.As(err, &nberr) {
-					assert.NotNil(t, r)
-				}
-
-				return
-			}
-
-			require.NoError(t, err)
-
-			addrs, err := r.LookupNetIP(context.Background(), "ip", "cloudflare-dns.com")
-			if err != nil {
-				// 在某些环境下 TCP 53 可能被防火墙拦截，出现 i/o timeout。
-				if strings.Contains(err.Error(), "i/o timeout") || strings.Contains(err.Error(), "timeout") {
-					t.Skipf("skip tcp lookup due to network timeout: %v", err)
-				}
-				require.NoError(t, err)
-			}
-
-			assert.NotEmpty(t, addrs)
-		})
+// runUpstreamResolverTest runs a single upstream resolver test case.
+func runUpstreamResolverTest(t *testing.T, tc testCase, opts *upstream.Options) {
+	r, err := upstream.NewUpstreamResolver(tc.addr, opts)
+	if tc.wantErrMsg != "" {
+		assert.Equal(t, tc.wantErrMsg, err.Error())
+		assertErrorType(t, err)
+		return
 	}
+
+	require.NoError(t, err)
+	validateResolverLookup(t, r)
+}
+
+// assertErrorType checks if the error is of expected type.
+func assertErrorType(t *testing.T, err error) {
+	if nberr := (&upstream.NotBootstrapError{}); errors.As(err, &nberr) {
+		assert.NotNil(t, nberr)
+	}
+}
+
+// validateResolverLookup validates the resolver can perform lookups.
+func validateResolverLookup(t *testing.T, r upstream.Resolver) {
+	addrs, err := r.LookupNetIP(context.Background(), "ip", "cloudflare-dns.com")
+	if err != nil {
+		handleLookupError(t, err)
+		return
+	}
+	assert.NotEmpty(t, addrs)
+}
+
+// handleLookupError handles network timeout errors gracefully.
+func handleLookupError(t *testing.T, err error) {
+	// 在某些环境下 TCP 53 可能被防火墙拦截，出现 i/o timeout。
+	if strings.Contains(err.Error(), "i/o timeout") || strings.Contains(err.Error(), "timeout") {
+		t.Skipf("skip tcp lookup due to network timeout: %v", err)
+	}
+	require.NoError(t, err)
 }
