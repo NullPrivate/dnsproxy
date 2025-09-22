@@ -1,14 +1,15 @@
 package upstream
 
 import (
-	"context"
-	"fmt"
-	"io"
-	"log/slog"
-	"net"
-	"net/url"
-	"strings"
-	"time"
+    "context"
+    "fmt"
+    "io"
+    "log/slog"
+    "net"
+    "net/url"
+    "os"
+    "strings"
+    "time"
 
 	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
 	"github.com/AdguardTeam/golibs/errors"
@@ -51,22 +52,33 @@ type plainDNS struct {
 // newPlain returns the plain DNS Upstream.  addr.Scheme should be either "udp"
 // or "tcp".
 func newPlain(addr *url.URL, opts *Options) (u *plainDNS, err error) {
-	switch addr.Scheme {
-	case networkUDP, networkTCP:
-		// Go on.
-	default:
-		return nil, fmt.Errorf("unsupported url scheme: %s", addr.Scheme)
-	}
+    switch addr.Scheme {
+    case networkUDP, networkTCP:
+        // Go on.
+    default:
+        return nil, fmt.Errorf("unsupported url scheme: %s", addr.Scheme)
+    }
 
-	addPort(addr, defaultPortPlain)
+    addPort(addr, defaultPortPlain)
 
-	return &plainDNS{
-		addr:      addr,
-		logger:    opts.Logger,
-		getDialer: newDialerInitializer(addr, opts),
-		net:       addr.Scheme,
-		timeout:   opts.Timeout,
-	}, nil
+    // 当环境变量 USE_TCP_REPLACE_UDP=1 且该目标需要通过 SOCKS 代理时：
+    // 若用户指定为 udp:53，则强制改为 tcp:53（仅影响该 upstream）。
+    // 无代理或非 SOCKS 代理时不转换。
+    if os.Getenv("USE_TCP_REPLACE_UDP") == "1" && addr.Scheme == string(networkUDP) {
+        if pt, _ := detectProxyTypeFor(addr.Host); pt == ProxyTypeSOCKS {
+            if addr.Port() == "53" { // 明确的 53 端口（addPort 已确保默认端口补全为 53）
+                addr.Scheme = string(networkTCP)
+            }
+        }
+    }
+
+    return &plainDNS{
+        addr:      addr,
+        logger:    opts.Logger,
+        getDialer: newDialerInitializer(addr, opts),
+        net:       addr.Scheme,
+        timeout:   opts.Timeout,
+    }, nil
 }
 
 // type check
@@ -87,27 +99,44 @@ func (p *plainDNS) Address() string {
 // dialExchange performs a DNS exchange with the specified dial handler.
 // network must be either [networkUDP] or [networkTCP].
 func (p *plainDNS) dialExchange(
-	network network,
-	dial bootstrap.DialHandler,
-	req *dns.Msg,
+    network network,
+    dial bootstrap.DialHandler,
+    req *dns.Msg,
 ) (resp *dns.Msg, err error) {
-	addr := p.Address()
-	client := &dns.Client{Timeout: p.timeout}
+    addr := p.Address()
+    client := &dns.Client{Timeout: p.timeout}
 
-	conn := &dns.Conn{}
-	if network == networkUDP {
-		conn.UDPSize = dns.MinMsgSize
-	}
+    conn := &dns.Conn{}
+    if network == networkUDP {
+        conn.UDPSize = dns.MinMsgSize
+    }
 
-	logBegin(p.logger, addr, network, req)
-	defer func() { logFinish(p.logger, addr, network, err) }()
+    logBegin(p.logger, addr, network, req)
+    defer func() { logFinish(p.logger, addr, network, err) }()
 
-	ctx := context.Background()
-	conn.Conn, err = dial(ctx, network, "")
-	if err != nil {
-		return nil, fmt.Errorf("dialing %s over %s: %w", p.addr.Host, network, err)
-	}
-	defer func(c net.Conn) { err = errors.WithDeferred(err, c.Close()) }(conn.Conn)
+    ctx := context.Background()
+    // 在 UDP/TCP 上优先选择可用的 SOCKS5 代理通道
+    if network == networkUDP {
+        if pt, proxyURL := detectProxyTypeFor(p.addr.Host); pt == ProxyTypeSOCKS {
+            // 通过 SOCKS5 UDP ASSOCIATE 建立“连接”
+            conn.Conn, err = dialUDPViaSocks(proxyURL, p.addr.Host)
+        } else {
+            conn.Conn, err = dial(ctx, network, "")
+        }
+    } else if network == networkTCP {
+        // 对于 plain DNS 的 TCP 回退，也尝试用 SOCKS5（如存在）
+        if pt, _ := detectProxyTypeFor(p.addr.Host); pt == ProxyTypeSOCKS {
+            conn.Conn, err = dialTCPWithOptionalProxy(dial, p.addr.Host)
+        } else {
+            conn.Conn, err = dial(ctx, network, "")
+        }
+    } else {
+        conn.Conn, err = dial(ctx, network, "")
+    }
+    if err != nil {
+        return nil, fmt.Errorf("dialing %s over %s: %w", p.addr.Host, network, err)
+    }
+    defer func(c net.Conn) { err = errors.WithDeferred(err, c.Close()) }(conn.Conn)
 
 	resp, _, err = client.ExchangeWithConn(req, conn)
 	if isExpectedConnErr(err) {

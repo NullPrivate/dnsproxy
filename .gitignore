@@ -16,3 +16,4 @@ example.crt
 example.key
 coverage.txt
 config.yaml
+socks_validate

@@ -10,9 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
+    
 	"runtime"
-	"strings"
+    
 	"sync"
 	"time"
 
@@ -24,6 +24,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
+    "golang.org/x/net/proxy"
 )
 
 // Values to configure HTTP and HTTP/2 transport.
@@ -74,8 +75,16 @@ type dnsOverHTTPS struct {
 	// for this upstream.
 	quicConf *quic.Config
 
-	// quicConfMu protects quicConf.
-	quicConfMu *sync.Mutex
+    // quicConfMu protects quicConf.
+    quicConfMu *sync.Mutex
+
+    // h3SocksPConn 是在通过 SOCKS5 代理使用 HTTP/3 时复用的 UDP 中继。
+    // 仅在 H3+SOCKS 场景下创建与使用。
+    h3SocksPConn net.PacketConn
+    // h3SocksProxyURL 记录当前中继的代理 URL，用于识别代理变更时的重建。
+    h3SocksProxyURL string
+    // h3SocksMu 保护上述 H3 SOCKS 相关字段。
+    h3SocksMu *sync.Mutex
 
 	// transportH2 is an HTTP/2 transport if any.
 	transportH2 *http2.Transport
@@ -108,7 +117,8 @@ func newDoH(addr *url.URL, opts *Options) (u Upstream, err error) {
 			TokenStore:      newQUICTokenStore(),
 			Tracer:          opts.QUICTracer,
 		},
-		quicConfMu: &sync.Mutex{},
+        quicConfMu: &sync.Mutex{},
+        h3SocksMu:  &sync.Mutex{},
 		tlsConf: &tls.Config{
 			ServerName:   addr.Hostname(),
 			RootCAs:      opts.RootCAs,
@@ -440,38 +450,58 @@ func (p *dnsOverHTTPS) createClient() (*http.Client, error) {
 // HTTP3 is enabled in the upstream options).  If this attempt is successful,
 // it returns an HTTP3 transport, otherwise it returns the H1/H2 transport.
 func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
-	// Detect proxy via system environment for this upstream URL.
-	reqForProxy := &http.Request{URL: p.addr}
-	proxyForReq, _ := http.ProxyFromEnvironment(reqForProxy)
-	useProxy := proxyForReq != nil
+    // 检测代理类型。HTTP 代理用于 H1/H2；SOCKS 代理可用于 H3（UDP）以及 H1/H2（TCP）。
+    proxyType, proxyURLStr := detectProxyTypeFor(p.addr.Host)
+    useProxy := proxyType != ProxyTypeNone
 
-	// Prepare bootstrap dialer. Needed for HTTP/3 probing and direct H1/H2.
+	// 预备引导拨号器：仅在直连或需要 H3 探测时使用。
 	dialContext, dialErr := p.getDialer()
 	if !useProxy {
 		if dialErr != nil {
 			return nil, fmt.Errorf("bootstrapping %s: %w", p.addrRedacted, dialErr)
 		}
 		p.logger.Debug("no proxy environment detected, using direct connection")
-	} else if dialErr != nil {
-		p.logger.Debug("proxy environment detected, http/3 probing may be unavailable", slogutil.KeyError, dialErr)
-	} else {
-		p.logger.Debug("proxy environment detected, http/1.1 and http/2 will use proxy")
+	} else if proxyType == ProxyTypeHTTP {
+		p.logger.Debug("http proxy detected, disabling http/3 and using proxy for h1/h2")
+	} else if proxyType == ProxyTypeSOCKS {
+		p.logger.Debug("socks proxy detected, disabling http/3 and using socks dialer for h1/h2")
 	}
 
-	// First, we attempt to create an HTTP3 transport.  If the probe QUIC
-	// connection is established successfully, we'll be using HTTP3 for this
-	// upstream.
-	tlsConf := p.tlsConf.Clone()
-
-	// Try HTTP/3 first. HTTP/3 path does not use HTTP proxies.
-	transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
-	if h3Err == nil {
-		p.logger.Debug("using http/3 for this upstream, quic was faster")
-
-		return transportH3, nil
-	}
-
-	p.logger.Debug("got error, switching to http/2 for this upstream", slogutil.KeyError, h3Err)
+    // 优先尝试 HTTP/3。
+    tlsConf := p.tlsConf.Clone()
+    switch proxyType {
+    case ProxyTypeSOCKS:
+        // 尝试通过 SOCKS5 UDP 中继建立 HTTP/3。
+        transportH3, h3Err := p.createTransportH3ViaSocks(tlsConf, dialContext, proxyURLStr)
+        if h3Err == nil {
+            p.logger.Debug("using http/3 via socks5 udp for this upstream")
+            return transportH3, nil
+        }
+        // 失败则尝试直连 H3（绕过代理），满足业务诉求。
+        p.logger.Debug("http/3 via socks failed, trying direct", slogutil.KeyError, h3Err)
+        transportH3, h3Err = p.createTransportH3(tlsConf, dialContext)
+        if h3Err == nil {
+            p.logger.Debug("using direct http/3 for this upstream")
+            return transportH3, nil
+        }
+        p.logger.Debug("direct http/3 failed, switching to http/2", slogutil.KeyError, h3Err)
+    case ProxyTypeHTTP:
+        // 存在 HTTP 代理，但仍优先尝试直连 H3（代理无法承载 UDP）。
+        transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
+        if h3Err == nil {
+            p.logger.Debug("using direct http/3 for this upstream (http proxy set)")
+            return transportH3, nil
+        }
+        p.logger.Debug("direct http/3 failed, switching to http/2", slogutil.KeyError, h3Err)
+    default:
+        // 无代理：沿用原有逻辑（探测 H3）。
+        transportH3, h3Err := p.createTransportH3(tlsConf, dialContext)
+        if h3Err == nil {
+            p.logger.Debug("using http/3 for this upstream, quic was faster")
+            return transportH3, nil
+        }
+        p.logger.Debug("got error, switching to http/2 for this upstream", slogutil.KeyError, h3Err)
+    }
 
 	if !p.supportsHTTP() {
 		return nil, errors.Error("HTTP1/1 and HTTP2 are not supported by this upstream")
@@ -489,13 +519,31 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 		ForceAttemptHTTP2: true,
 	}
 
-	// Use system proxy settings for HTTP/1.1 and HTTP/2
-	transport.Proxy = http.ProxyFromEnvironment
-
-	// Only set custom DialContext if not using proxy
-	if !useProxy && dialContext != nil {
-		transport.DialContext = dialContext
-	}
+    // 根据代理类型设置传输层。
+    if proxyType == ProxyTypeHTTP {
+        // HTTP/HTTPS 代理通过标准环境变量处理。
+        transport.Proxy = http.ProxyFromEnvironment
+    } else if proxyType == ProxyTypeSOCKS {
+		// SOCKS 代理通过自定义 DialContext 实现。
+		u, perr := url.Parse(proxyURLStr)
+		if perr != nil {
+			return nil, fmt.Errorf("parsing proxy url: %w", perr)
+		}
+		d, perr := proxy.FromURL(u, proxy.Direct)
+		if perr != nil {
+			return nil, fmt.Errorf("creating socks dialer: %w", perr)
+		}
+		if cd, ok := d.(proxy.ContextDialer); ok {
+			transport.DialContext = cd.DialContext
+		} else {
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				return d.Dial(network, address)
+			}
+		}
+    } else if dialContext != nil {
+        // 无代理：使用引导拨号器固定到引导解析出的目标 IP。
+        transport.DialContext = dialContext
+    }
 
 	// Explicitly configure transport to use HTTP/2.
 	//
@@ -516,10 +564,13 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 // connection to a host instead of creating a new one all the time.  It also
 // helps mitigate race issues with quic-go.
 type http3Transport struct {
-	baseTransport *http3.Transport
+    baseTransport *http3.Transport
 
-	closed bool
-	mu     sync.RWMutex
+    closed bool
+    mu     sync.RWMutex
+
+    // onClose 在传输关闭后调用，用于释放额外资源（如 SOCKS UDP 中继）。
+    onClose func()
 }
 
 // type check
@@ -550,12 +601,18 @@ var _ io.Closer = (*http3Transport)(nil)
 
 // Close implements the io.Closer interface for *http3Transport.
 func (h *http3Transport) Close() (err error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+    h.mu.Lock()
+    defer h.mu.Unlock()
 
-	h.closed = true
+    h.closed = true
 
-	return h.baseTransport.Close()
+    // 先关闭底层 H3 传输与所有 QUIC 连接，再执行额外清理。
+    err = h.baseTransport.Close()
+    if h.onClose != nil {
+        h.onClose()
+    }
+
+    return err
 }
 
 // createTransportH3 tries to create an HTTP/3 transport for this upstream.  We
@@ -564,8 +621,8 @@ func (h *http3Transport) Close() (err error) {
 // parallel (one for TLS, the other one for QUIC) and if QUIC is faster it will
 // create the [*http3.Transport] instance.
 func (p *dnsOverHTTPS) createTransportH3(
-	tlsConfig *tls.Config,
-	dialContext bootstrap.DialHandler,
+    tlsConfig *tls.Config,
+    dialContext bootstrap.DialHandler,
 ) (roundTripper http.RoundTripper, err error) {
 	if !p.supportsH3() {
 		return nil, errors.Error("HTTP3 support is not enabled")
@@ -595,6 +652,67 @@ func (p *dnsOverHTTPS) createTransportH3(
 	}
 
 	return &http3Transport{baseTransport: rt}, nil
+}
+
+// createTransportH3ViaSocks 创建基于 SOCKS5 UDP 中继的 HTTP/3 传输，
+// 以便在存在 SOCKS 代理时也能让 DoH 通过 H3 走代理。
+// 若 dialContext 可用，则优先使用引导解析得到的可达地址；否则退回使用原始 Host。
+func (p *dnsOverHTTPS) createTransportH3ViaSocks(
+    tlsConfig *tls.Config,
+    dialContext bootstrap.DialHandler,
+    proxyURLStr string,
+) (http.RoundTripper, error) {
+    if !p.supportsH3() {
+        return nil, errors.Error("HTTP3 support is not enabled")
+    }
+
+    var addr string
+    var err error
+    if dialContext != nil {
+        // 不做 TLS/QUIC 竞速，直接获取可达地址即可。
+        addr, err = p.probeBootstrapAddr(dialContext)
+        if err != nil {
+            return nil, err
+        }
+    } else {
+        // 无引导拨号器时使用原始 Host。
+        addr = p.addr.Host
+    }
+
+    rt := &http3.Transport{
+        Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+            // 复用/重建 SOCKS UDP 中继
+            pconn, err := p.getOrCreateH3SocksPacketConn(proxyURLStr)
+            if err != nil {
+                return nil, fmt.Errorf("init socks udp relay: %w", err)
+            }
+            raddr, err := net.ResolveUDPAddr("udp", addr)
+            if err != nil {
+                return nil, fmt.Errorf("resolve udp addr %s: %w", addr, err)
+            }
+            c, err := quic.DialEarly(ctx, pconn, raddr, tlsCfg, cfg)
+            if err != nil {
+                // 若拨号失败，尝试重置中继并重拨一次
+                p.logger.Debug("doh h3 via socks dial failed; recreating relay", slogutil.KeyError, err)
+                p.closeH3SocksPacketConn()
+                pconn, rerr := p.getOrCreateH3SocksPacketConn(proxyURLStr)
+                if rerr != nil {
+                    return nil, fmt.Errorf("re-init socks udp relay: %w", rerr)
+                }
+                c, err = quic.DialEarly(ctx, pconn, raddr, tlsCfg, cfg)
+                if err != nil {
+                    return nil, fmt.Errorf("dial http/3 via socks (after relay reset): %w", err)
+                }
+            }
+            return c, nil
+        },
+        DisableCompression: true,
+        TLSClientConfig:    tlsConfig,
+        QUICConfig:         p.getQUICConfig(),
+    }
+
+    // 关闭传输时一并关闭中继，避免泄漏
+    return &http3Transport{baseTransport: rt, onClose: p.closeH3SocksPacketConn}, nil
 }
 
 // probeH3 runs a test to check whether QUIC is faster than TLS for this
@@ -777,50 +895,47 @@ func (p *dnsOverHTTPS) supportsHTTP() (ok bool) {
 
 // isHTTP3 checks if the *http.Client is an HTTP/3 client.
 func isHTTP3(client *http.Client) (ok bool) {
-	_, ok = client.Transport.(*http3Transport)
+    _, ok = client.Transport.(*http3Transport)
 
-	return ok
+    return ok
 }
 
-// ProxyType represents the type of proxy detected
-type ProxyType int
+// getOrCreateH3SocksPacketConn 返回 H3 下复用的 SOCKS5 UDP 中继。
+func (p *dnsOverHTTPS) getOrCreateH3SocksPacketConn(proxyURL string) (net.PacketConn, error) {
+    p.h3SocksMu.Lock()
+    defer p.h3SocksMu.Unlock()
 
-const (
-	ProxyTypeNone ProxyType = iota
-	ProxyTypeHTTP
-	ProxyTypeSOCKS
-)
+    if p.h3SocksPConn != nil && p.h3SocksProxyURL == proxyURL {
+        return p.h3SocksPConn, nil
+    }
 
-// detectProxyType checks proxy environment variables and returns the proxy type and URL.
-// It checks HTTP_PROXY, HTTPS_PROXY, and their lowercase versions for HTTP proxies,
-// and ALL_PROXY, all_proxy for SOCKS proxies.
-func detectProxyType() (ProxyType, string) {
-	// Check for HTTP/HTTPS proxies first
-	httpProxies := []string{
-		"HTTP_PROXY", "http_proxy",
-		"HTTPS_PROXY", "https_proxy",
-	}
+    // 代理变化或未创建：关闭旧中继并新建
+    if p.h3SocksPConn != nil {
+        _ = p.h3SocksPConn.Close()
+        p.h3SocksPConn = nil
+        p.h3SocksProxyURL = ""
+    }
 
-	for _, env := range httpProxies {
-		if proxy := os.Getenv(env); proxy != "" {
-			// Determine if it's HTTP or SOCKS by URL scheme
-			if strings.HasPrefix(strings.ToLower(proxy), "socks") {
-				return ProxyTypeSOCKS, proxy
-			}
-			return ProxyTypeHTTP, proxy
-		}
-	}
+    pc, err := newSocksPacketConn(proxyURL)
+    if err != nil {
+        return nil, err
+    }
+    p.h3SocksPConn = pc
+    p.h3SocksProxyURL = proxyURL
 
-	// Check for SOCKS proxies in ALL_PROXY
-	socksProxies := []string{
-		"ALL_PROXY", "all_proxy",
-	}
+    return pc, nil
+}
 
-	for _, env := range socksProxies {
-		if proxy := os.Getenv(env); proxy != "" {
-			return ProxyTypeSOCKS, proxy
-		}
-	}
+// closeH3SocksPacketConn 关闭并清理 H3 复用的 SOCKS 中继。
+func (p *dnsOverHTTPS) closeH3SocksPacketConn() {
+    p.h3SocksMu.Lock()
+    defer p.h3SocksMu.Unlock()
 
-	return ProxyTypeNone, ""
+    if p.h3SocksPConn != nil {
+        if err := p.h3SocksPConn.Close(); err != nil {
+            p.logger.Debug("closing doh h3 socks relay", slogutil.KeyError, err)
+        }
+        p.h3SocksPConn = nil
+        p.h3SocksProxyURL = ""
+    }
 }

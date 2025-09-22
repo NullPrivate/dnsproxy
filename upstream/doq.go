@@ -1,16 +1,16 @@
 package upstream
 
 import (
-	"context"
-	"crypto/tls"
-	"fmt"
-	"log/slog"
-	"net"
-	"net/url"
-	"os"
-	"runtime"
-	"sync"
-	"time"
+    "context"
+    "crypto/tls"
+    "fmt"
+    "log/slog"
+    "net"
+    "net/url"
+    "os"
+    "runtime"
+    "sync"
+    "time"
 
 	"github.com/AdguardTeam/dnsproxy/proxyutil"
 	"github.com/AdguardTeam/golibs/errors"
@@ -71,9 +71,18 @@ type dnsOverQUIC struct {
 	// re-create the connection.
 	quicConfig *quic.Config
 
-	// conn is the current active QUIC connection.  It can be closed and
-	// re-opened when needed.
-	conn quic.Connection
+    // conn is the current active QUIC connection.  It can be closed and
+    // re-opened when needed.
+    conn quic.Connection
+
+    // socksPConn 是在通过 SOCKS5 代理建立 QUIC 连接时使用的中继 PacketConn。
+    // 当启用了 SOCKS 代理时，我们尽量在多个 QUIC 连接之间顺序复用同一个
+    // UDP ASSOCIATE 通道，以减少握手与代理端开销。
+    socksPConn net.PacketConn
+
+    // socksProxyURL 记录当前 socksPConn 对应的代理 URL；当环境代理变化时，
+    // 需要丢弃旧的中继并重新建立。
+    socksProxyURL string
 
 	// bytesPool is a *sync.Pool we use to store byte buffers in.  These byte
 	// buffers are used to read responses from the upstream.
@@ -199,16 +208,18 @@ func (p *dnsOverQUIC) Exchange(req *dns.Msg) (resp *dns.Msg, err error) {
 
 // Close implements the [Upstream] interface for *dnsOverQUIC.
 func (p *dnsOverQUIC) Close() (err error) {
-	p.connMu.Lock()
-	defer p.connMu.Unlock()
+    p.connMu.Lock()
+    defer p.connMu.Unlock()
 
-	runtime.SetFinalizer(p, nil)
+    runtime.SetFinalizer(p, nil)
 
-	if p.conn != nil {
-		err = p.conn.CloseWithError(QUICCodeNoError, "")
-	}
+    if p.conn != nil {
+        err = p.conn.CloseWithError(QUICCodeNoError, "")
+    }
+    // 关闭 SOCKS 中继通道（如有）。
+    p.closeSocksPacketConn()
 
-	return err
+    return err
 }
 
 // exchangeQUIC attempts to open a new QUIC stream, send the DNS message
@@ -326,41 +337,76 @@ func (p *dnsOverQUIC) openStream(conn quic.Connection) (quic.Stream, error) {
 
 // openConnection dials a new QUIC connection.
 func (p *dnsOverQUIC) openConnection() (conn quic.Connection, err error) {
-	dialContext, err := p.getDialer()
-	if err != nil {
-		return nil, fmt.Errorf("bootstrapping %s: %w", p.addr, err)
-	}
+    dialContext, err := p.getDialer()
+    if err != nil {
+        return nil, fmt.Errorf("bootstrapping %s: %w", p.addr, err)
+    }
 
-	// we're using bootstrapped address instead of what's passed to the function
-	// it does not create an actual connection, but it helps us determine
-	// what IP is actually reachable (when there're v4/v6 addresses).
-	rawConn, err := dialContext(context.Background(), "udp", "")
-	if err != nil {
-		return nil, fmt.Errorf("dialing raw connection to %s: %w", p.addr, err)
-	}
+    // 先通过引导拨号器获取可达的上游 IP:port（不复用该连接，仅取地址）。
+    rawConn, err := dialContext(context.Background(), "udp", "")
+    if err != nil {
+        return nil, fmt.Errorf("dialing raw connection to %s: %w", p.addr, err)
+    }
+    // 取到可达地址后立即关闭。
+    udpConn, ok := rawConn.(*net.UDPConn)
+    if !ok {
+        _ = rawConn.Close()
+        return nil, fmt.Errorf("unexpected type %T of connection; should be %T", rawConn, udpConn)
+    }
+    addr := udpConn.RemoteAddr().String()
+    if cerr := rawConn.Close(); cerr != nil {
+        p.logger.Debug("closing raw connection", "addr", p.addr, slogutil.KeyError, cerr)
+    }
 
-	// It's never actually used.
-	err = rawConn.Close()
-	if err != nil {
-		p.logger.Debug("closing raw connection", "addr", p.addr, slogutil.KeyError, err)
-	}
+    ctx, cancel := p.withDeadline(context.Background())
+    defer cancel()
 
-	udpConn, ok := rawConn.(*net.UDPConn)
-	if !ok {
-		return nil, fmt.Errorf("unexpected type %T of connection; should be %T", rawConn, udpConn)
-	}
-
-	addr := udpConn.RemoteAddr().String()
-
-	ctx, cancel := p.withDeadline(context.Background())
-	defer cancel()
-
-	conn, err = quic.DialAddrEarly(ctx, addr, p.tlsConf.Clone(), p.getQUICConfig())
-	if err != nil {
-		return nil, fmt.Errorf("dialing quic connection to %s: %w", p.addr, err)
-	}
-
-	return conn, nil
+    // 检测代理：SOCKS 代理下通过 UDP 中继建立 QUIC；HTTP 代理不支持 QUIC。
+    proxyType, proxyURLStr := detectProxyTypeFor(p.addr.Host)
+    switch proxyType {
+    case ProxyTypeSOCKS:
+        // 通过 SOCKS5 UDP 中继构造 PacketConn，再用 quic.DialEarly。
+        // 优先复用已存在的中继；若失败则重建一次。
+        pconn, perr := p.getOrCreateSocksPacketConn(proxyURLStr)
+        if perr != nil {
+            return nil, fmt.Errorf("init socks udp relay: %w", perr)
+        }
+        raddr, rerr := net.ResolveUDPAddr("udp", addr)
+        if rerr != nil {
+            // 解析失败无需保守关闭中继，直接返回错误。
+            return nil, fmt.Errorf("resolve udp addr %s: %w", addr, rerr)
+        }
+        qconn, qerr := quic.DialEarly(ctx, pconn, raddr, p.tlsConf.Clone(), p.getQUICConfig())
+        if qerr != nil {
+            // 尝试重建一次中继后再拨号，提升健壮性。
+            p.logger.Debug("doq: quic dial via socks failed; recreating relay", slogutil.KeyError, qerr)
+            p.closeSocksPacketConn()
+            pconn, perr = p.getOrCreateSocksPacketConn(proxyURLStr)
+            if perr != nil {
+                return nil, fmt.Errorf("re-init socks udp relay: %w", perr)
+            }
+            qconn, qerr = quic.DialEarly(ctx, pconn, raddr, p.tlsConf.Clone(), p.getQUICConfig())
+            if qerr != nil {
+                return nil, fmt.Errorf("dial quic via socks (after relay reset): %w", qerr)
+            }
+        }
+        return qconn, nil
+    case ProxyTypeHTTP:
+        // HTTP 代理无法承载 QUIC/UDP，按需求改为直连而不是报错。
+        p.logger.Debug("http proxy detected; DoQ ignores it and dials direct")
+        conn, err = quic.DialAddrEarly(ctx, addr, p.tlsConf.Clone(), p.getQUICConfig())
+        if err != nil {
+            return nil, fmt.Errorf("dialing quic connection to %s: %w", p.addr, err)
+        }
+        return conn, nil
+    default:
+        // 直连：使用默认 UDP 套接字。
+        conn, err = quic.DialAddrEarly(ctx, addr, p.tlsConf.Clone(), p.getQUICConfig())
+        if err != nil {
+            return nil, fmt.Errorf("dialing quic connection to %s: %w", p.addr, err)
+        }
+        return conn, nil
+    }
 }
 
 // closeConnWithError closes the active connection with error to make sure that
@@ -380,15 +426,47 @@ func (p *dnsOverQUIC) closeConnWithError(conn quic.Connection, err error) {
 		p.resetQUICConfig()
 	}
 
-	err = conn.CloseWithError(code, "")
-	if err != nil {
-		p.logger.Error("failed to close the conn", slogutil.KeyError, err)
-	}
+    err = conn.CloseWithError(code, "")
+    if err != nil {
+        p.logger.Error("failed to close the conn", slogutil.KeyError, err)
+    }
 
 	// If the connection that's being closed is cached, reset the cache.
-	if p.conn == conn {
-		p.conn = nil
-	}
+    if p.conn == conn {
+        p.conn = nil
+    }
+}
+
+// getOrCreateSocksPacketConn 返回可用的 SOCKS5 UDP 中继 PacketConn。
+// 若当前存量与代理 URL 不一致或为空，则会先关闭旧的再新建。
+func (p *dnsOverQUIC) getOrCreateSocksPacketConn(proxyURL string) (net.PacketConn, error) {
+    // 在 connMu 保护下被调用。
+    if p.socksPConn != nil && p.socksProxyURL == proxyURL {
+        return p.socksPConn, nil
+    }
+
+    // 环境或代理变化：关闭旧中继。
+    p.closeSocksPacketConn()
+
+    pc, err := newSocksPacketConn(proxyURL)
+    if err != nil {
+        return nil, err
+    }
+    p.socksPConn = pc
+    p.socksProxyURL = proxyURL
+
+    return pc, nil
+}
+
+// closeSocksPacketConn 安全关闭并清理当前持有的 SOCKS5 UDP 中继。
+func (p *dnsOverQUIC) closeSocksPacketConn() {
+    if p.socksPConn != nil {
+        if cerr := p.socksPConn.Close(); cerr != nil {
+            p.logger.Debug("closing socks udp relay", slogutil.KeyError, cerr)
+        }
+        p.socksPConn = nil
+        p.socksProxyURL = ""
+    }
 }
 
 // readMsg reads the incoming DNS message from the QUIC stream.
