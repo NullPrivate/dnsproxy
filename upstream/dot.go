@@ -1,21 +1,21 @@
 package upstream
 
 import (
-    "crypto/tls"
-    "fmt"
-    "io"
-    "log/slog"
-    "net"
-    "net/url"
-    "os"
-    "runtime"
-    "sync"
-    "time"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
+	"runtime"
+	"sync"
+	"time"
 
-    "github.com/AdguardTeam/dnsproxy/internal/bootstrap"
-    "github.com/AdguardTeam/golibs/errors"
-    "github.com/AdguardTeam/golibs/logutil/slogutil"
-    "github.com/miekg/dns"
+	"github.com/AdguardTeam/dnsproxy/internal/bootstrap"
+	"github.com/AdguardTeam/golibs/errors"
+	"github.com/AdguardTeam/golibs/logutil/slogutil"
+	"github.com/miekg/dns"
 )
 
 // dialTimeout is the global timeout for establishing a TLS connection.
@@ -159,10 +159,10 @@ func (p *dnsOverTLS) conn(h bootstrap.DialHandler) (conn net.Conn, err error) {
 		}
 	}()
 
-    // 检查代理设置：在仅有一个固定 SOCKS 代理的前提下，允许复用连接。
-    // 复用前会在下方对连接设置新的截止时间；若复用失败，会回退到新建连接路径。
-    // 因此不再因 SOCKS 存在而绕过连接池。
-    _ /*proxyType*/, _ = detectProxyTypeFor(p.addr.Host)
+	// 检查代理设置：在仅有一个固定 SOCKS 代理的前提下，允许复用连接。
+	// 复用前会在下方对连接设置新的截止时间；若复用失败，会回退到新建连接路径。
+	// 因此不再因 SOCKS 存在而绕过连接池。
+	_ /*proxyType*/, _ = detectProxyTypeFor(p.addr.Host)
 
 	p.connsMu.Lock()
 	defer p.connsMu.Unlock()
@@ -222,12 +222,12 @@ func (p *dnsOverTLS) exchangeWithConn(conn net.Conn, req *dns.Msg) (reply *dns.M
 // tlsDial is basically the same as tls.DialWithDialer, but we will call our own
 // dialContext function to get connection. It also supports system proxy if configured.
 func tlsDial(dialContext bootstrap.DialHandler, conf *tls.Config, upstreamAddr string) (c *tls.Conn, err error) {
-    rawConn, err := dialTCPWithOptionalProxy(dialContext, upstreamAddr)
-    if err != nil {
-        return nil, err
-    }
+	rawConn, err := dialTCPWithOptionalProxy(dialContext, upstreamAddr)
+	if err != nil {
+		return nil, err
+	}
 
-    return performTLSHandshake(rawConn, conf)
+	return performTLSHandshake(rawConn, conf)
 }
 
 // performTLSHandshake 将超时应用于连接并完成 TLS 握手。
