@@ -38,25 +38,25 @@ const (
 
 // Upstream URLs used in tests of [UpstreamConfig].
 const (
-	generalUpstream     = "tcp://general.upstream:53"
-	unqualifiedUpstream = "tcp://unqualified.upstream:53"
-	tldUpstream         = "tcp://tld.upstream:53"
-	domainUpstream      = "tcp://domain.upstream:53"
-	wildcardUpstream    = "tcp://wildcard.upstream:53"
-	subdomainUpstream   = "tcp://subdomain.upstream:53"
+	generalUpstream     = "general.upstream:53"
+	unqualifiedUpstream = "unqualified.upstream:53"
+	tldUpstream         = "tld.upstream:53"
+	domainUpstream      = "domain.upstream:53"
+	wildcardUpstream    = "wildcard.upstream:53"
+	subdomainUpstream   = "subdomain.upstream:53"
 )
 
 // testUpstreamConfigLines is the common set of upstream configurations used in
 // tests of [UpstreamConfig].
 var testUpstreamConfigLines = []string{
-	generalUpstream,
-	"[//]" + unqualifiedUpstream,
-	"[/" + topLevelDomain + "/]" + tldUpstream,
+	"tcp://" + generalUpstream,
+	"[//]tcp://" + unqualifiedUpstream,
+	"[/" + topLevelDomain + "/]tcp://" + tldUpstream,
 	"[/" + wildcardFirstLevelDomain + "/]#",
-	"[/" + firstLevelDomain + "/]" + domainUpstream,
-	"[/" + wildcardDomain + "/]" + wildcardUpstream,
+	"[/" + firstLevelDomain + "/]tcp://" + domainUpstream,
+	"[/" + wildcardDomain + "/]tcp://" + wildcardUpstream,
 	"[/" + generalDomain + "/]#",
-	"[/" + subDomain + "/]" + subdomainUpstream,
+	"[/" + subDomain + "/]tcp://" + subdomainUpstream,
 }
 
 func TestUpstreamConfig_GetUpstreamsForDomain(t *testing.T) {

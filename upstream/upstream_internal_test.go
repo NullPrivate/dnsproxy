@@ -262,7 +262,7 @@ func TestAddressToUpstream(t *testing.T) {
 	}, {
 		addr: "tcp://one.one.one.one",
 		opt:  opt,
-		want: "tcp://one.one.one.one:53",
+		want: "one.one.one.one:53",
 	}, {
 		addr: "tls://one.one.one.one",
 		opt:  opt,
