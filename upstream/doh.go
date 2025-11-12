@@ -627,7 +627,7 @@ func (p *dnsOverHTTPS) createTransportH3(
 			_ string,
 			tlsCfg *tls.Config,
 			cfg *quic.Config,
-		) (c quic.EarlyConnection, err error) {
+		) (c *quic.Conn, err error) {
 			c, err = quic.DialAddrEarly(ctx, addr, tlsCfg, cfg)
 			return c, err
 		},
@@ -665,7 +665,7 @@ func (p *dnsOverHTTPS) createTransportH3ViaSocks(
 	}
 
 	rt := &http3.Transport{
-		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			return p.dialEarlyViaSocksH3(ctx, addr, proxyURLStr, tlsCfg, cfg)
 		},
 		DisableCompression: true,
@@ -705,7 +705,7 @@ func (p *dnsOverHTTPS) dialEarlyViaSocksH3(
 	addr, proxyURLStr string,
 	tlsCfg *tls.Config,
 	cfg *quic.Config,
-) (quic.EarlyConnection, error) {
+) (*quic.Conn, error) {
 	pconn, err := p.getOrCreateH3SocksPacketConn(proxyURLStr)
 	if err != nil {
 		return nil, fmt.Errorf("init socks udp relay: %w", err)

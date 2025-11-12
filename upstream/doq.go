@@ -69,7 +69,7 @@ type dnsOverQUIC struct {
 
 	// 16 字节接口类型分组
 	socksPConn net.PacketConn
-	conn       quic.Connection
+	conn       *quic.Conn
 
 	// 非指针字段用于分隔，降低指针区字节数
 	timeout time.Duration
@@ -198,7 +198,7 @@ func (p *dnsOverQUIC) Close() (err error) {
 
 // exchangeQUIC attempts to open a new QUIC stream, send the DNS message
 // through it and return the response it got from the server.
-func (p *dnsOverQUIC) exchangeQUIC(req *dns.Msg, conn quic.Connection) (resp *dns.Msg, err error) {
+func (p *dnsOverQUIC) exchangeQUIC(req *dns.Msg, conn *quic.Conn) (resp *dns.Msg, err error) {
 	addr := p.Address()
 
 	logBegin(p.logger, addr, networkUDP, req)
@@ -256,9 +256,9 @@ func (p *dnsOverQUIC) getBytesPool() (pool *sync.Pool) {
 	return p.bytesPool
 }
 
-// getConnection opens or returns an existing quic.Connection and indicates
+// getConnection opens or returns an existing quic.Conn and indicates
 // whether it opened a new connection or used an existing cached one.
-func (p *dnsOverQUIC) getConnection() (conn quic.Connection, cached bool, err error) {
+func (p *dnsOverQUIC) getConnection() (conn *quic.Conn, cached bool, err error) {
 	p.connMu.Lock()
 	defer p.connMu.Unlock()
 
@@ -297,7 +297,7 @@ func (p *dnsOverQUIC) resetQUICConfig() {
 }
 
 // openStream opens a new QUIC stream for the specified connection.
-func (p *dnsOverQUIC) openStream(conn quic.Connection) (quic.Stream, error) {
+func (p *dnsOverQUIC) openStream(conn *quic.Conn) (*quic.Stream, error) {
 	ctx, cancel := p.withDeadline(context.Background())
 	defer cancel()
 
@@ -310,7 +310,7 @@ func (p *dnsOverQUIC) openStream(conn quic.Connection) (quic.Stream, error) {
 }
 
 // openConnection dials a new QUIC connection.
-func (p *dnsOverQUIC) openConnection() (quic.Connection, error) {
+func (p *dnsOverQUIC) openConnection() (*quic.Conn, error) {
 	dialContext, err := p.getDialer()
 	if err != nil {
 		return nil, fmt.Errorf("bootstrapping %s: %w", p.addr, err)
@@ -353,7 +353,7 @@ func (p *dnsOverQUIC) resolveBootstrapUDPAddr(dialContext bootstrap.DialHandler)
 	return addr, nil
 }
 
-func (p *dnsOverQUIC) dialQUICDirect(ctx context.Context, addr string) (quic.Connection, error) {
+func (p *dnsOverQUIC) dialQUICDirect(ctx context.Context, addr string) (*quic.Conn, error) {
 	conn, err := quic.DialAddrEarly(ctx, addr, p.tlsConf.Clone(), p.getQUICConfig())
 	if err != nil {
 		return nil, fmt.Errorf("dialing quic connection to %s: %w", p.addr, err)
@@ -361,7 +361,7 @@ func (p *dnsOverQUIC) dialQUICDirect(ctx context.Context, addr string) (quic.Con
 	return conn, nil
 }
 
-func (p *dnsOverQUIC) dialQUICViaSocks(ctx context.Context, addr, proxyURLStr string) (quic.Connection, error) {
+func (p *dnsOverQUIC) dialQUICViaSocks(ctx context.Context, addr, proxyURLStr string) (*quic.Conn, error) {
 	pconn, err := p.getOrCreateSocksPacketConn(proxyURLStr)
 	if err != nil {
 		return nil, fmt.Errorf("init socks udp relay: %w", err)
@@ -390,7 +390,7 @@ func (p *dnsOverQUIC) dialQUICViaSocks(ctx context.Context, addr, proxyURLStr st
 // closeConnWithError closes the active connection with error to make sure that
 // new queries were processed in another connection.  We can do that in the case
 // of a fatal error.
-func (p *dnsOverQUIC) closeConnWithError(conn quic.Connection, err error) {
+func (p *dnsOverQUIC) closeConnWithError(conn *quic.Conn, err error) {
 	p.connMu.Lock()
 	defer p.connMu.Unlock()
 
@@ -462,7 +462,7 @@ func hashProxyURL(s string) uint64 {
 }
 
 // readMsg reads the incoming DNS message from the QUIC stream.
-func (p *dnsOverQUIC) readMsg(stream quic.Stream) (m *dns.Msg, err error) {
+func (p *dnsOverQUIC) readMsg(stream *quic.Stream) (m *dns.Msg, err error) {
 	pool := p.getBytesPool()
 	bufPtr := pool.Get().(*[]byte)
 
