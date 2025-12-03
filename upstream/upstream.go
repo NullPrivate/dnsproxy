@@ -28,6 +28,11 @@ import (
 	"github.com/quic-go/quic-go/logging"
 )
 
+// GlobalUseSocksForQUIC 为编译期/代码级别的全局开关：
+// - true：允许 QUIC（DoQ/H3）走 SOCKS；
+// - false：QUIC 始终直连，忽略 SOCKS（默认）。
+var GlobalUseSocksForQUIC = false
+
 // Upstream is an interface for a DNS resolver.  All the methods must be safe
 // for concurrent use.
 type Upstream interface {
@@ -59,6 +64,11 @@ type Options struct {
 	// Logger is used for logging during parsing and upstream exchange.  If nil,
 	// [slog.Default] is used.
 	Logger *slog.Logger
+
+	// UseSocksForQUIC controls whether QUIC-based traffic (DoQ / HTTP/3) should
+	// be sent through SOCKS proxy when detected from environment. Default false
+	// means QUIC will dial directly, ignoring SOCKS for QUIC paths.
+	UseSocksForQUIC bool
 
 	// VerifyServerCertificate is used to set the VerifyPeerCertificate property
 	// of the *tls.Config for DNS-over-HTTPS, DNS-over-QUIC, and DNS-over-TLS.
@@ -111,6 +121,7 @@ func (o *Options) Clone() (clone *Options) {
 		Bootstrap:                 o.Bootstrap,
 		Timeout:                   o.Timeout,
 		HTTPVersions:              o.HTTPVersions,
+		UseSocksForQUIC:           o.UseSocksForQUIC,
 		VerifyServerCertificate:   o.VerifyServerCertificate,
 		VerifyConnection:          o.VerifyConnection,
 		VerifyDNSCryptCertificate: o.VerifyDNSCryptCertificate,

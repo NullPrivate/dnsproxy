@@ -149,6 +149,8 @@ func doSocksUserPassAuth(tcpConn net.Conn, user, pass string) error {
 }
 
 // socks5UDPAssociate 发送 UDP ASSOCIATE 请求，返回服务器分配的中继地址与端口。
+// 若服务器返回的 BND.ADDR 为未指定地址（0.0.0.0 或 ::），按 RFC1928 约定，
+// 客户端应当使用已建立的 TCP 控制连接的对端地址作为 UDP 中继 IP。
 func socks5UDPAssociate(tcpConn net.Conn) (net.IP, uint16, error) {
 	req := []byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
 	if _, err := tcpConn.Write(req); err != nil {
@@ -173,6 +175,24 @@ func socks5UDPAssociate(tcpConn net.Conn) (net.IP, uint16, error) {
 		return nil, 0, fmt.Errorf("socks read bnd.port: %w", e)
 	}
 	bndPort := binary.BigEndian.Uint16(portBuf)
+
+	// 一些 SOCKS5 实现（例如部分服务器或移动端代理）会返回 0.0.0.0/:: 作为 BND.ADDR，
+	// 表示 UDP 中继 IP 与 TCP 控制连接的对端 IP 相同。此时需要用 TCP 对端 IP 代替。
+	if bndIP.Equal(net.IPv4zero) || bndIP.Equal(net.IPv6zero) {
+		if raddr := tcpConn.RemoteAddr(); raddr != nil {
+			if ta, ok := raddr.(*net.TCPAddr); ok && ta.IP != nil {
+				bndIP = ta.IP
+			} else {
+				// 兜底解析字符串形式
+				host, _, herr := net.SplitHostPort(raddr.String())
+				if herr == nil {
+					if ip := net.ParseIP(host); ip != nil {
+						bndIP = ip
+					}
+				}
+			}
+		}
+	}
 
 	return bndIP, bndPort, nil
 }

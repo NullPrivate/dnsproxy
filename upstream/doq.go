@@ -73,6 +73,10 @@ type dnsOverQUIC struct {
 
 	// 非指针字段用于分隔，降低指针区字节数
 	timeout time.Duration
+	// 控制是否允许 QUIC 经 SOCKS；默认从全局与 Options 继承。
+	useSocksForQUIC bool
+	// 当前连接所使用的代理类型（None/SOCKS）
+	connProxyType ProxyType
 
 	// 字符串置于末尾
 	socksProxySig uint64
@@ -106,11 +110,12 @@ func newDoQ(addr *url.URL, opts *Options) (u Upstream, err error) {
 			VerifyConnection:      opts.VerifyConnection,
 			NextProtos:            compatProtoDQ,
 		},
-		quicConfigMu: &sync.Mutex{},
-		connMu:       &sync.Mutex{},
-		bytesPoolMu:  &sync.Mutex{},
-		logger:       opts.Logger,
-		timeout:      opts.Timeout,
+		quicConfigMu:    &sync.Mutex{},
+		connMu:          &sync.Mutex{},
+		bytesPoolMu:     &sync.Mutex{},
+		logger:          opts.Logger,
+		timeout:         opts.Timeout,
+		useSocksForQUIC: GlobalUseSocksForQUIC || (opts != nil && opts.UseSocksForQUIC),
 	}
 
 	runtime.SetFinalizer(u, (*dnsOverQUIC).Close)
@@ -200,6 +205,13 @@ func (p *dnsOverQUIC) Close() (err error) {
 // through it and return the response it got from the server.
 func (p *dnsOverQUIC) exchangeQUIC(req *dns.Msg, conn *quic.Conn) (resp *dns.Msg, err error) {
 	addr := p.Address()
+
+	// 记录本次请求是否走代理
+	proxyLabel := "none"
+	if p.connProxyType == ProxyTypeSOCKS {
+		proxyLabel = "socks"
+	}
+	p.logger.Info("doq request route", "addr", addr, "proto", networkUDP, "proxy", proxyLabel)
 
 	logBegin(p.logger, addr, networkUDP, req)
 	defer func() { logFinish(p.logger, addr, networkUDP, err) }()
@@ -327,12 +339,36 @@ func (p *dnsOverQUIC) openConnection() (*quic.Conn, error) {
 	proxyType, proxyURLStr := detectProxyTypeFor(p.addr.Host)
 	switch proxyType {
 	case ProxyTypeSOCKS:
-		return p.dialQUICViaSocks(ctx, addr, proxyURLStr)
+		if p.useSocksForQUIC {
+			qc, err := p.dialQUICViaSocks(ctx, addr, proxyURLStr)
+			if err != nil {
+				return nil, err
+			}
+			p.connProxyType = ProxyTypeSOCKS
+			return qc, nil
+		}
+		p.logger.Info("socks proxy detected; DoQ bypasses socks per policy, dialing direct")
+		qc, err := p.dialQUICDirect(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		p.connProxyType = ProxyTypeNone
+		return qc, nil
 	case ProxyTypeHTTP:
 		p.logger.Debug("http proxy detected; DoQ ignores it and dials direct")
-		return p.dialQUICDirect(ctx, addr)
+		qc, err := p.dialQUICDirect(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		p.connProxyType = ProxyTypeNone
+		return qc, nil
 	default:
-		return p.dialQUICDirect(ctx, addr)
+		qc, err := p.dialQUICDirect(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		p.connProxyType = ProxyTypeNone
+		return qc, nil
 	}
 }
 

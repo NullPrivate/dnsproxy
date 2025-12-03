@@ -199,6 +199,13 @@ func (p *dnsOverTLS) putBack(conn net.Conn) {
 func (p *dnsOverTLS) exchangeWithConn(conn net.Conn, req *dns.Msg) (reply *dns.Msg, err error) {
 	addr := p.Address()
 
+	// 记录本次请求是否走代理（DoT 仅在 SOCKS 下走代理）
+	proxyLabel := "none"
+	if pt, _ := detectProxyTypeFor(p.addr.Host); pt == ProxyTypeSOCKS {
+		proxyLabel = "socks"
+	}
+	p.logger.Info("dot request route", "addr", addr, "proto", networkTCP, "proxy", proxyLabel)
+
 	logBegin(p.logger, addr, networkTCP, req)
 	defer func() { logFinish(p.logger, addr, networkTCP, err) }()
 

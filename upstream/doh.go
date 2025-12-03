@@ -93,6 +93,14 @@ type dnsOverHTTPS struct {
 
 	// timeout is used in HTTP client and for H3 probes.
 	timeout time.Duration
+
+	// 控制是否允许 QUIC 经 SOCKS；默认来自全局与 Options。
+	useSocksForQUIC bool
+
+	// h3BackoffUntil 为因错误触发的 H3 临时禁用截止时间。
+	h3BackoffUntil time.Time
+	// h3BackoffMu 保护 h3BackoffUntil。
+	h3BackoffMu *sync.Mutex
 }
 
 // newDoH returns the DNS-over-HTTPS Upstream.
@@ -132,10 +140,12 @@ func newDoH(addr *url.URL, opts *Options) (u Upstream, err error) {
 			VerifyPeerCertificate: opts.VerifyServerCertificate,
 			VerifyConnection:      opts.VerifyConnection,
 		},
-		clientMu:     &sync.Mutex{},
-		logger:       opts.Logger,
-		addrRedacted: addr.Redacted(),
-		timeout:      opts.Timeout,
+		clientMu:        &sync.Mutex{},
+		logger:          opts.Logger,
+		addrRedacted:    addr.Redacted(),
+		timeout:         opts.Timeout,
+		useSocksForQUIC: GlobalUseSocksForQUIC || (opts != nil && opts.UseSocksForQUIC),
+		h3BackoffMu:     &sync.Mutex{},
 	}
 	for _, v := range httpVersions {
 		ups.tlsConf.NextProtos = append(ups.tlsConf.NextProtos, string(v))
@@ -181,12 +191,22 @@ func (p *dnsOverHTTPS) Exchange(req *dns.Msg) (resp *dns.Msg, err error) {
 	// Make the first attempt to send the DNS query.
 	resp, err = p.exchangeHTTPS(client, req)
 
+	// 首次创建的客户端（isCached=false）如果是 H3 且出现可回退错误（如超时），
+	// 立即重置客户端并回退到 H2（按环境变量代理），以避免后续请求继续使用不通的 H3。
+	if err != nil && !isCached && isHTTP3(client) && p.shouldRetry(err, true) {
+		client, rerr := p.resetClient(err)
+		if rerr != nil {
+			return nil, fmt.Errorf("failed to reset http client: %w", rerr)
+		}
+		resp, err = p.exchangeHTTPS(client, req)
+	}
+
 	// Make up to 2 attempts to re-create the HTTP client and send the request
 	// again.  There are several cases (mostly, with QUIC) where this workaround
 	// is necessary to make HTTP client usable.  We need to make 2 attempts in
 	// the case when the connection was closed (due to inactivity for example)
 	// AND the server refuses to open a 0-RTT connection.
-	for i := 0; isCached && p.shouldRetry(err) && i < 2; i++ {
+	for i := 0; isCached && p.shouldRetry(err, isHTTP3(client)) && i < 2; i++ {
 		client, err = p.resetClient(err)
 		if err != nil {
 			return nil, fmt.Errorf("failed to reset http client: %w", err)
@@ -238,6 +258,27 @@ func (p *dnsOverHTTPS) exchangeHTTPS(client *http.Client, req *dns.Msg) (resp *d
 	if isHTTP3(client) {
 		n = networkUDP
 	}
+
+	// 记录本次请求是否走代理
+	proxyLabel := "none"
+	switch rt := client.Transport.(type) {
+	case *http3Transport:
+		if rt.proxyType == ProxyTypeSOCKS {
+			proxyLabel = "socks"
+		}
+	case *httpTransportWithProxy:
+		switch rt.proxyType {
+		case ProxyTypeSOCKS:
+			proxyLabel = "socks"
+		case ProxyTypeHTTP:
+			proxyLabel = "http"
+		default:
+			proxyLabel = "none"
+		}
+	default:
+		proxyLabel = "none"
+	}
+	p.logger.Info("doh request route", "addr", p.addrRedacted, "proto", n, "proxy", proxyLabel)
 
 	logBegin(p.logger, p.addrRedacted, n, req)
 	defer func() { logFinish(p.logger, p.addrRedacted, n, err) }()
@@ -326,16 +367,16 @@ func (p *dnsOverHTTPS) exchangeHTTPSClient(
 
 // shouldRetry checks what error we have received and returns true if we should
 // re-create the HTTP client and retry the request.
-func (p *dnsOverHTTPS) shouldRetry(err error) (ok bool) {
+func (p *dnsOverHTTPS) shouldRetry(err error, clientIsH3 bool) (ok bool) {
 	if err == nil {
 		return false
 	}
 
-	// 禁止因超时进行重试，避免在上游不稳定时放大阻塞。
-	// 仅保留 QUIC 特定错误触发的重试逻辑。
+	// 超时：一般情况下不重试以避免阻塞扩大；但若当前为 H3 客户端，
+	// 我们需要触发一次回退到 H2（带代理），因此返回 true。
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		return false
+		return clientIsH3
 	}
 
 	if isQUICRetryError(err) {
@@ -351,6 +392,11 @@ func (p *dnsOverHTTPS) shouldRetry(err error) (ok bool) {
 func (p *dnsOverHTTPS) resetClient(resetErr error) (client *http.Client, err error) {
 	p.clientMu.Lock()
 	defer p.clientMu.Unlock()
+
+	// 若此前客户端是 H3，且错误表明需要回退，则开启一段 H3 冷却期，期间不再尝试 H3。
+	if old := p.client; old != nil && isHTTP3(old) && p.shouldBackoffH3(resetErr) {
+		p.startH3Backoff()
+	}
 
 	if errors.Is(resetErr, quic.Err0RTTRejected) {
 		// Reset the TokenStore only if 0-RTT was rejected.
@@ -455,14 +501,22 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 	} else if proxyType == ProxyTypeHTTP {
 		p.logger.Debug("http proxy detected, disabling http/3 and using proxy for h1/h2")
 	} else if proxyType == ProxyTypeSOCKS {
-		p.logger.Debug("socks proxy detected, disabling http/3 and using socks dialer for h1/h2")
+		if p.useSocksForQUIC {
+			p.logger.Info("socks proxy detected, enabling http/3 via socks and using socks dialer for h1/h2")
+		} else {
+			p.logger.Info("socks proxy detected, http/3 will bypass socks; h1/h2 use socks")
+		}
 	}
 
 	tlsConf := p.tlsConf.Clone()
 
 	// 优先尝试 HTTP/3，根据代理策略决定具体方式。
-	if h3, ok := p.tryHTTP3WithProxy(proxyType, proxyURLStr, tlsConf, dialContext); ok {
-		return h3, nil
+	if !p.isH3BackoffActive() {
+		if h3, ok := p.tryHTTP3WithProxy(proxyType, proxyURLStr, tlsConf, dialContext); ok {
+			return h3, nil
+		}
+	} else {
+		p.logger.Info("temporarily disabling http/3 after previous failure; falling back to http/2")
 	}
 
 	if !p.supportsHTTP() {
@@ -480,8 +534,11 @@ func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 		return nil, err
 	}
 	p.transportH2.ReadIdleTimeout = transportDefaultReadIdleTimeout
-
-	return transport, nil
+	// 包装一层，记录代理类型，便于请求时输出路由信息
+	return &httpTransportWithProxy{
+		baseTransport: transport,
+		proxyType:     proxyType,
+	}, nil
 }
 
 // tryHTTP3WithProxy 根据代理类型尝试创建 HTTP/3 传输；若成功返回 (rt, true)。
@@ -493,7 +550,11 @@ func (p *dnsOverHTTPS) tryHTTP3WithProxy(
 ) (http.RoundTripper, bool) {
 	switch proxyType {
 	case ProxyTypeSOCKS:
-		return p.tryH3WithSocks(proxyURLStr, tlsConf, dialContext)
+		if p.useSocksForQUIC {
+			return p.tryH3WithSocks(proxyURLStr, tlsConf, dialContext)
+		}
+		// QUIC 不走 SOCKS 时，直接尝试直连 H3。
+		return p.tryH3Direct(tlsConf, dialContext, "direct http/3 for this upstream (socks quic disabled)")
 	case ProxyTypeHTTP:
 		return p.tryH3Direct(tlsConf, dialContext, "direct http/3 for this upstream (http proxy set)")
 	default:
@@ -553,6 +614,8 @@ type http3Transport struct {
 	// 指针字段放前，减少 GC 扫描范围。
 	baseTransport *http3.Transport
 	onClose       func()
+	// 记录该 H3 传输的代理类型（None/SOCKS）
+	proxyType ProxyType
 
 	mu     sync.RWMutex
 	closed bool
@@ -636,7 +699,7 @@ func (p *dnsOverHTTPS) createTransportH3(
 		QUICConfig:         p.getQUICConfig(),
 	}
 
-	return &http3Transport{baseTransport: rt}, nil
+	return &http3Transport{baseTransport: rt, proxyType: ProxyTypeNone}, nil
 }
 
 // createTransportH3ViaSocks 创建基于 SOCKS5 UDP 中继的 HTTP/3 传输，
@@ -664,6 +727,11 @@ func (p *dnsOverHTTPS) createTransportH3ViaSocks(
 		addr = p.addr.Host
 	}
 
+	// 预检：通过 SOCKS UDP 中继做一次短时 QUIC 拨号验证；失败则回退到 H2/H1。
+	if err := p.preflightH3ViaSocks(addr, proxyURLStr, tlsConfig); err != nil {
+		return nil, fmt.Errorf("http/3 preflight via socks failed: %w", err)
+	}
+
 	rt := &http3.Transport{
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			return p.dialEarlyViaSocksH3(ctx, addr, proxyURLStr, tlsCfg, cfg)
@@ -674,7 +742,33 @@ func (p *dnsOverHTTPS) createTransportH3ViaSocks(
 	}
 
 	// 关闭传输时一并关闭中继，避免泄漏
-	return &http3Transport{baseTransport: rt, onClose: p.closeH3SocksPacketConn}, nil
+	return &http3Transport{baseTransport: rt, onClose: p.closeH3SocksPacketConn, proxyType: ProxyTypeSOCKS}, nil
+}
+
+// preflightH3ViaSocks 通过 SOCKS5 UDP 中继进行一次最短超时的 QUIC 建连预检。
+// 成功则立即关闭连接；失败则提示上层回退为 H2/H1。
+func (p *dnsOverHTTPS) preflightH3ViaSocks(addr, proxyURLStr string, tlsCfg *tls.Config) error {
+	pconn, err := p.getOrCreateH3SocksPacketConn(proxyURLStr)
+	if err != nil {
+		return fmt.Errorf("init socks udp relay: %w", err)
+	}
+	raddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return fmt.Errorf("resolve udp addr %s: %w", addr, err)
+	}
+	// 预检采用较短的总超时，避免长时间阻塞。
+	t := p.timeout
+	if t == 0 || t > 2*time.Second {
+		t = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), t)
+	defer cancel()
+	conn, err := quic.DialEarly(ctx, pconn, raddr, tlsCfg, p.getQUICConfig())
+	if err != nil {
+		return err
+	}
+	_ = conn.CloseWithError(QUICCodeNoError, "")
+	return nil
 }
 
 // tryH3WithSocks 通过 SOCKS5 中继尝试 H3，失败后退回直连 H3。
@@ -697,6 +791,17 @@ func (p *dnsOverHTTPS) tryH3Direct(tlsConf *tls.Config, dialContext bootstrap.Di
 		p.logger.Debug("direct http/3 failed, switching to http/2", slogutil.KeyError, err)
 	}
 	return nil, false
+}
+
+// httpTransportWithProxy 是对 *http.Transport 的轻量封装，用于记录代理类型。
+type httpTransportWithProxy struct {
+	baseTransport *http.Transport
+	proxyType     ProxyType
+}
+
+// RoundTrip 实现 http.RoundTripper 接口。
+func (h *httpTransportWithProxy) RoundTrip(req *http.Request) (*http.Response, error) {
+	return h.baseTransport.RoundTrip(req)
 }
 
 // dialEarlyViaSocksH3 通过 SOCKS5 UDP 中继拨号 QUIC，用于 H3 传输。
@@ -914,6 +1019,40 @@ func isHTTP3(client *http.Client) (ok bool) {
 	_, ok = client.Transport.(*http3Transport)
 
 	return ok
+}
+
+// shouldBackoffH3 判断是否需要对 H3 进行临时禁用（冷却）。
+func (p *dnsOverHTTPS) shouldBackoffH3(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
+}
+
+// startH3Backoff 以 p.timeout（或一个合理最小值）作为 H3 冷却时间。
+func (p *dnsOverHTTPS) startH3Backoff() {
+	d := p.timeout
+	if d <= 0 {
+		d = 5 * time.Second
+	}
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	p.h3BackoffMu.Lock()
+	p.h3BackoffUntil = time.Now().Add(d)
+	p.h3BackoffMu.Unlock()
+}
+
+// isH3BackoffActive 返回当前是否处于 H3 冷却期。
+func (p *dnsOverHTTPS) isH3BackoffActive() bool {
+	p.h3BackoffMu.Lock()
+	until := p.h3BackoffUntil
+	p.h3BackoffMu.Unlock()
+	return !until.IsZero() && time.Now().Before(until)
 }
 
 // getOrCreateH3SocksPacketConn 返回 H3 下复用的 SOCKS5 UDP 中继。
