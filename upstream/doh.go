@@ -48,23 +48,22 @@ const (
 // dnsOverHTTPS is a struct that implements the Upstream interface for the
 // DNS-over-HTTPS protocol.
 type dnsOverHTTPS struct {
-	// getDialer either returns an initialized dial handler or creates a new
-	// one.
-	getDialer DialerInitializer
+	// h3BackoffUntil 为因错误触发的 H3 临时禁用截止时间。
+	h3BackoffUntil time.Time
 
-	// addr is the DNS-over-HTTPS server URL.
-	addr *url.URL
-
-	// tlsConf is the configuration of TLS.
-	tlsConf *tls.Config
-
-	// The Client's Transport typically has internal state (cached TCP
-	// connections), so Clients should be reused instead of created as needed.
-	// Clients are safe for concurrent use by multiple goroutines.
-	client *http.Client
+	// h3SocksPConn 是在通过 SOCKS5 代理使用 HTTP/3 时复用的 UDP 中继。
+	// 仅在 H3+SOCKS 场景下创建与使用。
+	h3SocksPConn net.PacketConn
 
 	// clientMu protects client.
 	clientMu *sync.Mutex
+
+	// h3BackoffMu 保护 h3BackoffUntil。
+	h3BackoffMu *sync.Mutex
+
+	// getDialer either returns an initialized dial handler or creates a new
+	// one.
+	getDialer DialerInitializer
 
 	// logger is used for exchange logging.  It is never nil.
 	logger *slog.Logger
@@ -76,16 +75,25 @@ type dnsOverHTTPS struct {
 	// quicConfMu protects quicConf.
 	quicConfMu *sync.Mutex
 
-	// h3SocksPConn 是在通过 SOCKS5 代理使用 HTTP/3 时复用的 UDP 中继。
-	// 仅在 H3+SOCKS 场景下创建与使用。
-	h3SocksPConn net.PacketConn
-	// h3SocksProxyURL 记录当前中继的代理 URL，用于识别代理变更时的重建。
-	h3SocksProxyURL string
+	// tlsConf is the configuration of TLS.
+	tlsConf *tls.Config
+
+	// The Client's Transport typically has internal state (cached TCP
+	// connections), so Clients should be reused instead of created as needed.
+	// Clients are safe for concurrent use by multiple goroutines.
+	client *http.Client
+
 	// h3SocksMu 保护上述 H3 SOCKS 相关字段。
 	h3SocksMu *sync.Mutex
 
 	// transportH2 is an HTTP/2 transport if any.
 	transportH2 *http2.Transport
+
+	// addr is the DNS-over-HTTPS server URL.
+	addr *url.URL
+
+	// h3SocksProxyURL 记录当前中继的代理 URL，用于识别代理变更时的重建。
+	h3SocksProxyURL string
 
 	// addrRedacted is the redacted string representation of addr.  It is saved
 	// separately to reduce allocations during logging and error reporting.
@@ -96,11 +104,6 @@ type dnsOverHTTPS struct {
 
 	// 控制是否允许 QUIC 经 SOCKS；默认来自全局与 Options。
 	useSocksForQUIC bool
-
-	// h3BackoffUntil 为因错误触发的 H3 临时禁用截止时间。
-	h3BackoffUntil time.Time
-	// h3BackoffMu 保护 h3BackoffUntil。
-	h3BackoffMu *sync.Mutex
 }
 
 // newDoH returns the DNS-over-HTTPS Upstream.
@@ -191,38 +194,76 @@ func (p *dnsOverHTTPS) Exchange(req *dns.Msg) (resp *dns.Msg, err error) {
 	// Make the first attempt to send the DNS query.
 	resp, err = p.exchangeHTTPS(client, req)
 
+	return p.handleExchangeResult(client, isCached, req, resp, err)
+}
+
+// handleExchangeResult applies retry logic for Exchange to keep cyclomatic
+// complexity of the main method low while preserving behavior.
+func (p *dnsOverHTTPS) handleExchangeResult(
+	client *http.Client,
+	isCached bool,
+	req *dns.Msg,
+	resp *dns.Msg,
+	err error,
+) (*dns.Msg, error) {
+	if err == nil {
+		return resp, nil
+	}
+
 	// 首次创建的客户端（isCached=false）如果是 H3 且出现可回退错误（如超时），
 	// 立即重置客户端并回退到 H2（按环境变量代理），以避免后续请求继续使用不通的 H3。
-	if err != nil && !isCached && isHTTP3(client) && p.shouldRetry(err, true) {
-		client, rerr := p.resetClient(err)
-		if rerr != nil {
-			return nil, fmt.Errorf("failed to reset http client: %w", rerr)
+	if !isCached && isHTTP3(client) && p.shouldRetry(err, true) {
+		client, resp, err = p.retryWithReset(client, req, err)
+		if err == nil {
+			return resp, nil
 		}
-		resp, err = p.exchangeHTTPS(client, req)
 	}
 
-	// Make up to 2 attempts to re-create the HTTP client and send the request
-	// again.  There are several cases (mostly, with QUIC) where this workaround
-	// is necessary to make HTTP client usable.  We need to make 2 attempts in
-	// the case when the connection was closed (due to inactivity for example)
-	// AND the server refuses to open a 0-RTT connection.
-	for i := 0; isCached && p.shouldRetry(err, isHTTP3(client)) && i < 2; i++ {
+	// 对已缓存客户端进行最多 2 次重置和重试。
+	if isCached {
+		_, resp, err = p.retryWithResetLoop(client, req, err)
+		if err == nil {
+			return resp, nil
+		}
+	}
+
+	// 最终失败，重置客户端避免后续使用。
+	_, resErr := p.resetClient(err)
+
+	return nil, errors.WithDeferred(err, resErr)
+}
+
+// retryWithReset 重置客户端并重试一次请求。
+func (p *dnsOverHTTPS) retryWithReset(
+	client *http.Client,
+	req *dns.Msg,
+	prevErr error,
+) (*http.Client, *dns.Msg, error) {
+	newClient, err := p.resetClient(prevErr)
+	if err != nil {
+		return client, nil, fmt.Errorf("failed to reset http client: %w", err)
+	}
+
+	resp, err := p.exchangeHTTPS(newClient, req)
+	return newClient, resp, err
+}
+
+// retryWithResetLoop 对缓存的客户端进行最多 2 次重置和重试。
+func (p *dnsOverHTTPS) retryWithResetLoop(
+	client *http.Client,
+	req *dns.Msg,
+	err error,
+) (*http.Client, *dns.Msg, error) {
+	var resp *dns.Msg
+	for i := 0; p.shouldRetry(err, isHTTP3(client)) && i < 2; i++ {
 		client, err = p.resetClient(err)
 		if err != nil {
-			return nil, fmt.Errorf("failed to reset http client: %w", err)
+			return nil, nil, fmt.Errorf("failed to reset http client: %w", err)
 		}
 
 		resp, err = p.exchangeHTTPS(client, req)
 	}
-
-	if err != nil {
-		// If the request failed anyway, make sure we don't use this client.
-		_, resErr := p.resetClient(err)
-
-		return nil, errors.WithDeferred(err, resErr)
-	}
-
-	return resp, err
+	return client, resp, err
 }
 
 // Close implements the Upstream interface for *dnsOverHTTPS.
@@ -493,36 +534,75 @@ func (p *dnsOverHTTPS) createClient() (*http.Client, error) {
 func (p *dnsOverHTTPS) createTransport() (t http.RoundTripper, err error) {
 	proxyType, proxyURLStr := detectProxyTypeFor(p.addr.Host)
 	dialContext, dialErr := p.getDialer()
-	if proxyType == ProxyTypeNone {
-		if dialErr != nil {
-			return nil, fmt.Errorf("bootstrapping %s: %w", p.addrRedacted, dialErr)
-		}
-		p.logger.Debug("no proxy environment detected, using direct connection")
-	} else if proxyType == ProxyTypeHTTP {
-		p.logger.Debug("http proxy detected, disabling http/3 and using proxy for h1/h2")
-	} else if proxyType == ProxyTypeSOCKS {
-		if p.useSocksForQUIC {
-			p.logger.Info("socks proxy detected, enabling http/3 via socks and using socks dialer for h1/h2")
-		} else {
-			p.logger.Info("socks proxy detected, http/3 will bypass socks; h1/h2 use socks")
-		}
+
+	if logErr := p.logProxyDetection(proxyType, dialErr); logErr != nil {
+		return nil, logErr
 	}
 
 	tlsConf := p.tlsConf.Clone()
 
 	// 优先尝试 HTTP/3，根据代理策略决定具体方式。
-	if !p.isH3BackoffActive() {
-		if h3, ok := p.tryHTTP3WithProxy(proxyType, proxyURLStr, tlsConf, dialContext); ok {
-			return h3, nil
+	if h3, ok := p.tryHTTP3IfEnabled(proxyType, proxyURLStr, tlsConf, dialContext); ok {
+		return h3, nil
+	}
+
+	// 若仅支持 H3（无 H1/H2）且此前因回退跳过 H3，仍需强制尝试 H3。
+	if !p.supportsHTTP() && p.supportsH3() {
+		h3, h3Err := p.createTransportH3(tlsConf, dialContext)
+		if h3Err != nil {
+			return nil, fmt.Errorf("http3-only upstream: %w", h3Err)
 		}
-	} else {
-		p.logger.Info("temporarily disabling http/3 after previous failure; falling back to http/2")
+		return h3, nil
 	}
 
 	if !p.supportsHTTP() {
 		return nil, errors.Error("HTTP1/1 and HTTP2 are not supported by this upstream")
 	}
 
+	return p.buildHTTP2Transport(proxyType, proxyURLStr, tlsConf, dialContext)
+}
+
+// logProxyDetection 记录代理检测结果并返回可能的错误。
+func (p *dnsOverHTTPS) logProxyDetection(proxyType ProxyType, dialErr error) error {
+	switch proxyType {
+	case ProxyTypeNone:
+		if dialErr != nil {
+			return fmt.Errorf("bootstrapping %s: %w", p.addrRedacted, dialErr)
+		}
+		p.logger.Debug("no proxy environment detected, using direct connection")
+	case ProxyTypeHTTP:
+		p.logger.Debug("http proxy detected, disabling http/3 and using proxy for h1/h2")
+	case ProxyTypeSOCKS:
+		if p.useSocksForQUIC {
+			p.logger.Info("socks proxy detected, enabling http/3 via socks and using socks dialer for h1/h2")
+		} else {
+			p.logger.Info("socks proxy detected, http/3 will bypass socks; h1/h2 use socks")
+		}
+	}
+	return nil
+}
+
+// tryHTTP3IfEnabled 尝试启用 HTTP/3，如果未被禁用的话。
+func (p *dnsOverHTTPS) tryHTTP3IfEnabled(
+	proxyType ProxyType,
+	proxyURLStr string,
+	tlsConf *tls.Config,
+	dialContext bootstrap.DialHandler,
+) (http.RoundTripper, bool) {
+	if p.isH3BackoffActive() {
+		p.logger.Info("temporarily disabling http/3 after previous failure; falling back to http/2")
+		return nil, false
+	}
+	return p.tryHTTP3WithProxy(proxyType, proxyURLStr, tlsConf, dialContext)
+}
+
+// buildHTTP2Transport 构建 HTTP/2 传输。
+func (p *dnsOverHTTPS) buildHTTP2Transport(
+	proxyType ProxyType,
+	proxyURLStr string,
+	tlsConf *tls.Config,
+	dialContext bootstrap.DialHandler,
+) (http.RoundTripper, error) {
 	transport, err := p.buildHTTPTransportWithProxy(proxyType, proxyURLStr, tlsConf, dialContext)
 	if err != nil {
 		return nil, err
@@ -728,8 +808,8 @@ func (p *dnsOverHTTPS) createTransportH3ViaSocks(
 	}
 
 	// 预检：通过 SOCKS UDP 中继做一次短时 QUIC 拨号验证；失败则回退到 H2/H1。
-	if err := p.preflightH3ViaSocks(addr, proxyURLStr, tlsConfig); err != nil {
-		return nil, fmt.Errorf("http/3 preflight via socks failed: %w", err)
+	if preflightErr := p.preflightH3ViaSocks(addr, proxyURLStr, tlsConfig); preflightErr != nil {
+		return nil, fmt.Errorf("http/3 preflight via socks failed: %w", preflightErr)
 	}
 
 	rt := &http3.Transport{

@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/AdguardTeam/dnsproxy/internal/dnsproxytest"
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/testutil"
 	"github.com/miekg/dns"
@@ -18,12 +20,32 @@ func TestFilteringHandler(t *testing.T) {
 	m := &sync.RWMutex{}
 	blockResponse := false
 
+	ups := &dnsproxytest.FakeUpstream{
+		OnAddress: func() (addr string) { return "" },
+		OnExchange: func(req *dns.Msg) (resp *dns.Msg, err error) {
+			resp = &dns.Msg{}
+			resp.SetReply(req)
+			resp.Answer = append(resp.Answer, &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   req.Question[0].Name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    60,
+				},
+				A: net.IPv4(8, 8, 8, 8),
+			})
+
+			return resp, nil
+		},
+		OnClose: func() (err error) { return nil },
+	}
+
 	// Prepare the proxy server
 	dnsProxy := mustNew(t, &Config{
 		Logger:                 slogutil.NewDiscardLogger(),
 		UDPListenAddr:          []*net.UDPAddr{net.UDPAddrFromAddrPort(localhostAnyPort)},
 		TCPListenAddr:          []*net.TCPAddr{net.TCPAddrFromAddrPort(localhostAnyPort)},
-		UpstreamConfig:         newTestUpstreamConfig(t, defaultTimeout, testDefaultUpstreamAddr),
+		UpstreamConfig:         &UpstreamConfig{Upstreams: []upstream.Upstream{ups}},
 		TrustedProxies:         defaultTrustedProxies,
 		RatelimitSubnetLenIPv4: 24,
 		RatelimitSubnetLenIPv6: 64,

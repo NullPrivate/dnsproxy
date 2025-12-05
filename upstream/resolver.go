@@ -200,6 +200,10 @@ func (r *UpstreamResolver) lookupNetIP(
 // TODO(e.burkov):  Consider NS and Extra sections when setting TTL.  Check out
 // what RFCs say about it.
 func (r *UpstreamResolver) request(host string, n bootstrap.Network) (res *ipResult, err error) {
+	if r.Upstream == nil {
+		return nil, fmt.Errorf("upstream resolver: upstream is nil")
+	}
+
 	var qtype uint16
 	switch n {
 	case bootstrap.NetworkIP4:

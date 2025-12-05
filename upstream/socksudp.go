@@ -178,23 +178,35 @@ func socks5UDPAssociate(tcpConn net.Conn) (net.IP, uint16, error) {
 
 	// 一些 SOCKS5 实现（例如部分服务器或移动端代理）会返回 0.0.0.0/:: 作为 BND.ADDR，
 	// 表示 UDP 中继 IP 与 TCP 控制连接的对端 IP 相同。此时需要用 TCP 对端 IP 代替。
-	if bndIP.Equal(net.IPv4zero) || bndIP.Equal(net.IPv6zero) {
-		if raddr := tcpConn.RemoteAddr(); raddr != nil {
-			if ta, ok := raddr.(*net.TCPAddr); ok && ta.IP != nil {
-				bndIP = ta.IP
-			} else {
-				// 兜底解析字符串形式
-				host, _, herr := net.SplitHostPort(raddr.String())
-				if herr == nil {
-					if ip := net.ParseIP(host); ip != nil {
-						bndIP = ip
-					}
-				}
-			}
+	bndIP = resolveBoundAddr(bndIP, tcpConn)
+
+	return bndIP, bndPort, nil
+}
+
+// resolveBoundAddr 处理 SOCKS5 服务器返回 0.0.0.0/:: 作为 BND.ADDR 的情况。
+func resolveBoundAddr(bndIP net.IP, tcpConn net.Conn) net.IP {
+	if !bndIP.Equal(net.IPv4zero) && !bndIP.Equal(net.IPv6zero) {
+		return bndIP
+	}
+
+	raddr := tcpConn.RemoteAddr()
+	if raddr == nil {
+		return bndIP
+	}
+
+	if ta, ok := raddr.(*net.TCPAddr); ok && ta.IP != nil {
+		return ta.IP
+	}
+
+	// 兜底解析字符串形式
+	host, _, herr := net.SplitHostPort(raddr.String())
+	if herr == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip
 		}
 	}
 
-	return bndIP, bndPort, nil
+	return bndIP
 }
 
 func readSocksAddr(r io.Reader, atyp byte) (net.IP, error) {

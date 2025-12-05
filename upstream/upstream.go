@@ -61,14 +61,14 @@ type QUICTraceFunc func(
 // Options for AddressToUpstream func.  With these options we can configure the
 // upstream properties.
 type Options struct {
-	// Logger is used for logging during parsing and upstream exchange.  If nil,
-	// [slog.Default] is used.
-	Logger *slog.Logger
+	// Bootstrap is used to resolve upstreams' hostnames.  If nil, the
+	// [net.DefaultResolver] will be used.
+	Bootstrap Resolver
 
-	// UseSocksForQUIC controls whether QUIC-based traffic (DoQ / HTTP/3) should
-	// be sent through SOCKS proxy when detected from environment. Default false
-	// means QUIC will dial directly, ignoring SOCKS for QUIC paths.
-	UseSocksForQUIC bool
+	// RootCAs is the CertPool that must be used by all upstreams.  Redefining
+	// RootCAs makes sense on iOS to overcome the 15MB memory limit of the
+	// NEPacketTunnelProvider.
+	RootCAs *x509.CertPool
 
 	// VerifyServerCertificate is used to set the VerifyPeerCertificate property
 	// of the *tls.Config for DNS-over-HTTPS, DNS-over-QUIC, and DNS-over-TLS.
@@ -87,17 +87,12 @@ type Options struct {
 	// connection and logging every packet that goes through.
 	QUICTracer QUICTraceFunc
 
-	// RootCAs is the CertPool that must be used by all upstreams.  Redefining
-	// RootCAs makes sense on iOS to overcome the 15MB memory limit of the
-	// NEPacketTunnelProvider.
-	RootCAs *x509.CertPool
+	// Logger is used for logging during parsing and upstream exchange.  If nil,
+	// [slog.Default] is used.
+	Logger *slog.Logger
 
 	// CipherSuites is a custom list of TLSv1.2 ciphers.
 	CipherSuites []uint16
-
-	// Bootstrap is used to resolve upstreams' hostnames.  If nil, the
-	// [net.DefaultResolver] will be used.
-	Bootstrap Resolver
 
 	// HTTPVersions is a list of HTTP versions that should be supported by the
 	// DNS-over-HTTPS client.  If not set, HTTP/1.1 and HTTP/2 will be used.
@@ -106,6 +101,11 @@ type Options struct {
 	// Timeout is the default upstream timeout.  It's also used as a timeout for
 	// bootstrap DNS requests.  Zero value disables the timeout.
 	Timeout time.Duration
+
+	// UseSocksForQUIC controls whether QUIC-based traffic (DoQ / HTTP/3) should
+	// be sent through SOCKS proxy when detected from environment. Default false
+	// means QUIC will dial directly, ignoring SOCKS for QUIC paths.
+	UseSocksForQUIC bool
 
 	// InsecureSkipVerify disables verifying the server's certificate.
 	InsecureSkipVerify bool

@@ -337,39 +337,47 @@ func (p *dnsOverQUIC) openConnection() (*quic.Conn, error) {
 	defer cancel()
 
 	proxyType, proxyURLStr := detectProxyTypeFor(p.addr.Host)
-	switch proxyType {
-	case ProxyTypeSOCKS:
-		if p.useSocksForQUIC {
-			qc, err := p.dialQUICViaSocks(ctx, addr, proxyURLStr)
-			if err != nil {
-				return nil, err
-			}
-			p.connProxyType = ProxyTypeSOCKS
-			return qc, nil
-		}
-		p.logger.Info("socks proxy detected; DoQ bypasses socks per policy, dialing direct")
-		qc, err := p.dialQUICDirect(ctx, addr)
+	return p.dialQUICWithProxy(ctx, addr, proxyType, proxyURLStr)
+}
+
+// dialQUICWithProxy 根据代理类型拨号 QUIC 连接。
+func (p *dnsOverQUIC) dialQUICWithProxy(
+	ctx context.Context,
+	addr string,
+	proxyType ProxyType,
+	proxyURLStr string,
+) (*quic.Conn, error) {
+	if proxyType == ProxyTypeSOCKS && p.useSocksForQUIC {
+		qc, err := p.dialQUICViaSocks(ctx, addr, proxyURLStr)
 		if err != nil {
 			return nil, err
 		}
-		p.connProxyType = ProxyTypeNone
-		return qc, nil
-	case ProxyTypeHTTP:
-		p.logger.Debug("http proxy detected; DoQ ignores it and dials direct")
-		qc, err := p.dialQUICDirect(ctx, addr)
-		if err != nil {
-			return nil, err
-		}
-		p.connProxyType = ProxyTypeNone
-		return qc, nil
-	default:
-		qc, err := p.dialQUICDirect(ctx, addr)
-		if err != nil {
-			return nil, err
-		}
-		p.connProxyType = ProxyTypeNone
+		p.connProxyType = ProxyTypeSOCKS
 		return qc, nil
 	}
+
+	return p.dialQUICDirectWithLogging(ctx, addr, proxyType)
+}
+
+// dialQUICDirectWithLogging 使用直连方式拨号 QUIC 并记录代理绕过信息。
+func (p *dnsOverQUIC) dialQUICDirectWithLogging(
+	ctx context.Context,
+	addr string,
+	proxyType ProxyType,
+) (*quic.Conn, error) {
+	switch proxyType {
+	case ProxyTypeSOCKS:
+		p.logger.Info("socks proxy detected; DoQ bypasses socks per policy, dialing direct")
+	case ProxyTypeHTTP:
+		p.logger.Debug("http proxy detected; DoQ ignores it and dials direct")
+	}
+
+	qc, err := p.dialQUICDirect(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	p.connProxyType = ProxyTypeNone
+	return qc, nil
 }
 
 func (p *dnsOverQUIC) resolveBootstrapUDPAddr(dialContext bootstrap.DialHandler) (string, error) {
