@@ -25,7 +25,7 @@ import (
 	"github.com/ameshkov/dnsstamps"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/logging"
+	"github.com/quic-go/quic-go/qlogwriter"
 )
 
 // GlobalUseSocksForQUIC 为编译期/代码级别的全局开关：
@@ -50,13 +50,13 @@ type Upstream interface {
 	io.Closer
 }
 
-// QUICTraceFunc is a function that returns a [logging.ConnectionTracer]
+// QUICTraceFunc is a function that returns a [qlogwriter.Trace]
 // specific for a given role and connection ID.
 type QUICTraceFunc func(
 	ctx context.Context,
-	role logging.Perspective,
+	isClient bool,
 	connID quic.ConnectionID,
-) (tracer *logging.ConnectionTracer)
+) (tracer qlogwriter.Trace)
 
 // Options for AddressToUpstream func.  With these options we can configure the
 // upstream properties.

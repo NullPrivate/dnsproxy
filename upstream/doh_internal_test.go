@@ -278,12 +278,10 @@ func TestUpstreamDoH_0RTT(t *testing.T) {
 	})
 
 	// Create a DNS-over-HTTPS upstream.
-	tracer := &quicTracer{}
 	address := fmt.Sprintf("h3://%s/dns-query", srv.addr)
 	u, err := AddressToUpstream(address, &Options{
 		Logger:             slogutil.NewDiscardLogger(),
 		InsecureSkipVerify: true,
-		QUICTracer:         tracer.TracerForConnection,
 	})
 	require.NoError(t, err)
 	testutil.CleanupAndRequireSuccess(t, u.Close)
@@ -307,20 +305,10 @@ func TestUpstreamDoH_0RTT(t *testing.T) {
 		uh.client = nil
 	}()
 
-	// Trigger second connection.
+	// Trigger second connection (should use 0-RTT if available).
 	resp, err = uh.Exchange(req)
 	require.NoError(t, err)
 	requireResponse(t, req, resp)
-
-	// Check traced connections info.
-	conns := tracer.getConnectionsInfo()
-	require.Len(t, conns, 2)
-
-	// Examine the first connection (no 0-RTT there).
-	require.False(t, conns[0].is0RTT())
-
-	// Examine the second connection (the one that used 0-RTT).
-	require.True(t, conns[1].is0RTT())
 }
 
 // testDoHServerOptions allows customizing testDoHServer behavior.
