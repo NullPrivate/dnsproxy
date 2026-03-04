@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"
@@ -119,6 +120,26 @@ func (p *Proxy) handleDNSRequest(d *DNSContext) (err error) {
 		} else {
 			err = errors.Annotate(p.Resolve(d), "using default request handler: %w")
 		}
+	}
+
+	if err != nil && errors.Is(err, upstream.ErrNoUpstreams) {
+		q := d.Req.Question[0]
+		qtype, ok := dns.TypeToString[q.Qtype]
+		if !ok || qtype == "" {
+			qtype = fmt.Sprintf("TYPE%d", q.Qtype)
+		}
+
+		p.logger.Error(
+			"no upstreams selected",
+			"proto", d.Proto,
+			"qname", q.Name,
+			"qtype", qtype,
+			"qtype_num", q.Qtype,
+			"requested_private_rdns", d.RequestedPrivateRDNS,
+			"is_private_client", d.IsPrivateClient,
+			"use_private_rdns", p.UsePrivateRDNS,
+			slogutil.KeyError, err,
+		)
 	}
 
 	p.logDNSMessage(d.Res)

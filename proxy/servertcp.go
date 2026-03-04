@@ -109,7 +109,7 @@ func (p *Proxy) tcpPacketLoop(l net.Listener, proto Proto, reqSema syncutil.Sema
 		// TODO(d.kolyshev): Pass and use context from above.
 		err = reqSema.Acquire(context.Background())
 		if err != nil {
-			p.logger.Error("acquiring semaphore", "proto", ProtoTCP, slogutil.KeyError, err)
+			p.logger.Error("acquiring semaphore", "proto", proto, slogutil.KeyError, err)
 
 			break
 		}
@@ -126,7 +126,7 @@ func (p *Proxy) handleTCPConnection(conn net.Conn, proto Proto, reqSema syncutil
 	defer func() {
 		err := conn.Close()
 		if err != nil {
-			logWithNonCrit(err, "closing conn", ProtoTCP, p.logger)
+			logWithNonCrit(err, "closing conn", proto, p.logger)
 		}
 	}()
 
@@ -136,10 +136,10 @@ func (p *Proxy) handleTCPConnection(conn net.Conn, proto Proto, reqSema syncutil
 		err := conn.SetDeadline(time.Now().Add(defaultTimeout))
 		if err != nil {
 			// Consider deadline errors non-critical.
-			logWithNonCrit(err, "setting deadline", ProtoTCP, p.logger)
+			logWithNonCrit(err, "setting deadline", proto, p.logger)
 		}
 
-		req := p.readDNSReq(conn)
+		req := p.readDNSReq(conn, proto)
 		if req == nil {
 			return
 		}
@@ -149,17 +149,17 @@ func (p *Proxy) handleTCPConnection(conn net.Conn, proto Proto, reqSema syncutil
 
 		err = p.handleDNSRequest(d)
 		if err != nil {
-			logWithNonCrit(err, "handling request", ProtoTCP, p.logger)
+			logWithNonCrit(err, "handling request", proto, p.logger)
 		}
 	}
 }
 
 // readDNSReq returns DNS request message from the given connection or nil if
 // it failed to read it.  Properly logs the error if it happened.
-func (p *Proxy) readDNSReq(conn net.Conn) (req *dns.Msg) {
+func (p *Proxy) readDNSReq(conn net.Conn, proto Proto) (req *dns.Msg) {
 	packet, err := readPrefixed(conn)
 	if err != nil {
-		logWithNonCrit(err, "reading msg", ProtoTCP, p.logger)
+		logWithNonCrit(err, "reading msg", proto, p.logger)
 
 		return nil
 	}
@@ -167,7 +167,7 @@ func (p *Proxy) readDNSReq(conn net.Conn) (req *dns.Msg) {
 	req = &dns.Msg{}
 	err = req.Unpack(packet)
 	if err != nil {
-		p.logger.Error("handling tcp; unpacking msg", slogutil.KeyError, err)
+		p.logger.Error("handling connection; unpacking msg", "proto", proto, slogutil.KeyError, err)
 
 		return nil
 	}
