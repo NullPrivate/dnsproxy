@@ -1,6 +1,6 @@
 module github.com/AdguardTeam/dnsproxy
 
-go 1.24.11
+go 1.25.0
 
 require (
 	github.com/AdguardTeam/golibs v0.32.9
@@ -12,11 +12,11 @@ require (
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	// TODO(s.chzhen):  Update after investigation of the 0-RTT bug/behavior
 	// when TestUpstreamDoH_serverRestart/http3/second_try keeps failing.
-	github.com/quic-go/quic-go v0.57.0
+	github.com/quic-go/quic-go v0.60.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
-	golang.org/x/net v0.47.0
-	golang.org/x/sys v0.38.0
+	golang.org/x/net v0.57.0
+	golang.org/x/sys v0.47.0
 	gonum.org/v1/gonum v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -62,16 +62,16 @@ require (
 	go.opentelemetry.io/otel v1.35.0 // indirect
 	go.opentelemetry.io/otel/metric v1.35.0 // indirect
 	go.opentelemetry.io/otel/trace v1.35.0 // indirect
-	golang.org/x/crypto v0.44.0 // indirect
+	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
-	golang.org/x/mod v0.29.0 // indirect
+	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/oauth2 v0.29.0 // indirect
-	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/telemetry v0.0.0-20251008203120-078029d740a8 // indirect
-	golang.org/x/term v0.37.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/telemetry v0.0.0-20260625142307-59b4966ccb57 // indirect
+	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
-	golang.org/x/tools v0.38.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 	golang.org/x/tools/go/expect v0.1.1-deprecated // indirect
 	golang.org/x/tools/go/packages/packagestest v0.1.1-deprecated // indirect
 	golang.org/x/vuln v1.1.4 // indirect
